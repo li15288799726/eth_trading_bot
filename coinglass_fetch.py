@@ -80,10 +80,28 @@ def fetch_liq(timeout=420):
     if not src:
         return False, "未捕获到聚合清算地图数据"
     LIQ_LATEST.parent.mkdir(parents=True, exist_ok=True)
+    # AUDIT_FIX_ASOF_001: stamp fetched_ts for point-in-time replay
+    payload = dict(d)
+    fetched_ts_ms = int(time.time() * 1000)
+    try:
+        fetched_ts_ms = int(src.stat().st_mtime * 1000)
+    except Exception:
+        pass
+    payload["fetched_ts"] = fetched_ts_ms
+    payload["fetched_at"] = datetime.now().isoformat(timespec="seconds")
+    payload["_source_file"] = src.name
     tmp = LIQ_LATEST.with_suffix(".tmp")
-    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     tmp.replace(LIQ_LATEST)
-    log("清算地图 -> %s (lastPrice %.2f)" % (LIQ_LATEST.name, d["lastPrice"]))
+    # Also append to history index for as-of selection
+    try:
+        hist_dir = LIQ_LATEST.parent / "liq_history"
+        hist_dir.mkdir(parents=True, exist_ok=True)
+        hist_name = "liq_%s.json" % datetime.now().strftime("%Y%m%d_%H%M%S")
+        (hist_dir / hist_name).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    log("清算地图 -> %s (lastPrice %.2f, fetched_ts=%s)" % (LIQ_LATEST.name, d["lastPrice"], fetched_ts_ms))
     return True, "lastPrice %.2f, %d 所" % (d["lastPrice"], len(d["data"]))
 
 

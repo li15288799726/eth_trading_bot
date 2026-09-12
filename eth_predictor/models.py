@@ -19,6 +19,7 @@ from eth_predictor.indicators import (
     calc_rolling_quantiles, calc_adaptive_volume_regime,
     calc_adaptive_vwap_extremes, calc_adaptive_exhaustion
 )
+from eth_predictor.asof import filter_closed_klines, now_ms
 from eth_predictor.regime import detect_market_regime
 from eth_predictor.scenarios import generate_scenario_tree
 from eth_predictor.feature_cross import FeatureCrossEngine
@@ -125,13 +126,18 @@ class ETHPredictor:
         if not price or price <= 0:
             return {}
 
-        kl_5m = market_snapshot.get("klines_5m", [])
-        kl_1h = market_snapshot.get("klines_1h", [])
-        kl_1d = market_snapshot.get("klines_1d", [])
-        liq_raw = market_snapshot.get("liq_raw_data", {})
+        # AUDIT_FIX_ASOF_001: defense-in-depth closed-bar / as-of-T filter
+        as_of_ms = market_snapshot.get("as_of_ms")
+        t_ms = now_ms(as_of_ms)
+        kl_5m = filter_closed_klines(market_snapshot.get("klines_5m", []), as_of_ms=t_ms, interval="5m")
+        kl_1h = filter_closed_klines(market_snapshot.get("klines_1h", []), as_of_ms=t_ms, interval="1h")
+        kl_1d = filter_closed_klines(market_snapshot.get("klines_1d", []), as_of_ms=t_ms, interval="1d")
+        liq_raw = market_snapshot.get("liq_raw_data", {}) or {}
+        if liq_raw.get("_liq_disabled") or not isinstance(liq_raw.get("data"), list):
+            liq_raw = {}
 
-        # 1. 基础指标计算
-        vwap_daily = market_snapshot.get("vwap_daily") or calc_daily_vwap(kl_5m)
+        # 1. 基础指标计算 (VWAP: day 00:00 -> T, closed bars only)
+        vwap_daily = market_snapshot.get("vwap_daily") or calc_daily_vwap(kl_5m, as_of_ms=t_ms, price=price)
         atr_5m = calc_atr(kl_5m, 14)
         atr_1h = calc_atr(kl_1h, 14) if kl_1h else max(10.0, atr_5m * 2.5)
         atr_1d = calc_atr(kl_1d, 14) if kl_1d else max(40.0, atr_1h * 3.5)

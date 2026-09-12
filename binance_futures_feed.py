@@ -21,6 +21,20 @@ from datetime import datetime, timezone, timedelta
 
 TZ_BJT = timezone(timedelta(hours=8))
 
+# AUDIT_FIX_ASOF_001 helpers (lazy-safe import for standalone feed use)
+try:
+    from eth_predictor.asof import (
+        filter_closed_klines, filter_completed_hist, as_of_filter,
+        day_start_ms_bjt, now_ms, INTERVAL_MS,
+    )
+except Exception:  # pragma: no cover
+    filter_closed_klines = None
+    filter_completed_hist = None
+    as_of_filter = None
+    day_start_ms_bjt = None
+    now_ms = None
+    INTERVAL_MS = {"5m": 300000, "1h": 3600000, "1d": 86400000}
+
 
 HOSTS = [
     "fapi.binance.com",
@@ -81,8 +95,18 @@ class BinanceFuturesFeed:
         self.global_ls_ratio = 1.0    # 全网散户/大户账户多空比 (动态拉取)
         self.funding_rate = 0.0001    # 实时资金费率 (动态拉取)
         self.vol_ma20 = 0.0           # 20根 5m K线均量
-        self.vol_ratio = 1.0          # 当前量比 (当前成交量 / 20周期均量)
-        
+        self.vol_ratio = 1.0          # 当前量比 (最近已收盘K线成交量 / 20周期均量)
+
+        # AUDIT_FIX_ASOF_001: point-in-time hist caches + WS closed flags
+        self.oi_hist_5m = []
+        self.oi_hist_1h = []
+        self.oi_hist_1d = []
+        self.taker_hist_5m = []
+        self.top_ls_hist_5m = []
+        self.global_ls_hist_5m = []
+        self._last_kline_closed = None   # last ETH 5m k.x from WS
+        self._last_btc_kline_closed = None
+
         self.last_heavy_update = 0.0  # 上次更新量仓衍生指标的时间
         self.last_ok_time = 0.0
         self.error = None
@@ -224,6 +248,8 @@ class BinanceFuturesFeed:
                     k = payload.get("k", {})
                     if k:
                         open_time = int(k.get("t", 0))
+                        is_closed = bool(k.get("x", False))  # Binance k.x — bar closed
+                        self._last_kline_closed = is_closed
                         candle = [
                             open_time,
                             float(k.get("o", 0.0)),
@@ -238,6 +264,8 @@ class BinanceFuturesFeed:
                             float(k.get("Q", 0.0)),
                             k.get("B", "0"),
                         ]
+                        # Raw buffer keeps forming bar for live price / TP tracking.
+                        # Feature accessors (get_closed_klines) exclude unclosed bars.
                         if not self.klines:
                             self.klines = [candle]
                         elif open_time == self.klines[-1][0]:
@@ -251,16 +279,13 @@ class BinanceFuturesFeed:
                         self.last_ws_message_time = now
                         self.last_ok_time = now
 
-                        if len(self.klines) >= 20:
-                            vols = [float(item[5]) for item in self.klines[-21:-1]]
-                            self.vol_ma20 = sum(vols) / len(vols) if vols else 1.0
-                            cur_vol = float(self.klines[-1][5])
-                            self.vol_ratio = round(cur_vol / self.vol_ma20, 2) if self.vol_ma20 > 0 else 1.0
+                        self._refresh_vol_ratio_closed()
 
                 elif "btcusdt@kline" in stream:
                     k = payload.get("k", {})
                     if k:
                         open_time = int(k.get("t", 0))
+                        self._last_btc_kline_closed = bool(k.get("x", False))
                         candle = [
                             open_time,
                             float(k.get("o", 0.0)),
@@ -336,7 +361,149 @@ class BinanceFuturesFeed:
             "last_event": last_ev
         }
 
+    def _refresh_vol_ratio_closed(self):
+        """Volume ratio from last CLOSED 5m bar only (AUDIT_FIX_ASOF_001)."""
+        closed = self.get_closed_klines("5m")
+        if len(closed) >= 20:
+            vols = [float(item[5]) for item in closed[-20:]]
+            self.vol_ma20 = sum(vols) / len(vols) if vols else 1.0
+            cur_vol = float(closed[-1][5])
+            self.vol_ratio = round(cur_vol / self.vol_ma20, 2) if self.vol_ma20 > 0 else 1.0
+        elif len(closed) >= 2:
+            vols = [float(item[5]) for item in closed[:-1]]
+            self.vol_ma20 = (sum(vols) / len(vols)) if vols else 1.0
+            cur_vol = float(closed[-1][5])
+            self.vol_ratio = round(cur_vol / self.vol_ma20, 2) if self.vol_ma20 > 0 else 1.0
+
+    def get_closed_klines(self, tf="5m", as_of_ms=None):
+        """
+        Return only bars with close_time <= as_of for the given TF.
+        Incomplete 1h/1d bars must not pollute features.
+        """
+        with self.data_lock:
+            if tf == "1h":
+                raw = list(self.klines_1h or [])
+                interval = "1h"
+            elif tf == "1d":
+                raw = list(self.klines_1d or [])
+                interval = "1d"
+            elif tf == "btc_5m":
+                raw = list(self.btc_klines_5m or [])
+                interval = "5m"
+            else:
+                raw = list(self.klines or [])
+                interval = "5m"
+        if filter_closed_klines is not None:
+            return filter_closed_klines(raw, as_of_ms=as_of_ms, interval=interval)
+        # Fallback without asof module: drop last bar if its close_time is in the future
+        t = int(as_of_ms) if as_of_ms is not None else int(time.time() * 1000)
+        out = []
+        dur = INTERVAL_MS.get(interval, 300000)
+        for k in raw:
+            try:
+                ct = int(float(k[6])) if len(k) > 6 and k[6] is not None else int(float(k[0])) + dur - 1
+                if ct <= t:
+                    out.append(k)
+            except Exception:
+                continue
+        return out
+
+    def get_microstructure_asof(self, as_of_ms=None):
+        """
+        Point-in-time OI / volume / long-short ratios (timestamp <= T, completed buckets).
+        Live path uses wall-clock when as_of_ms is None.
+        """
+        t = int(as_of_ms) if as_of_ms is not None else int(time.time() * 1000)
+
+        def _completed(hist, period):
+            if filter_completed_hist is not None:
+                return filter_completed_hist(hist, period=period, as_of_ms=t)
+            return list(hist or [])
+
+        oi5 = _completed(self.oi_hist_5m, "5m")
+        oi1h = _completed(self.oi_hist_1h, "1h")
+        oi1d = _completed(self.oi_hist_1d, "1d")
+        taker = _completed(self.taker_hist_5m, "5m")
+        top = _completed(self.top_ls_hist_5m, "5m")
+        glob = _completed(self.global_ls_hist_5m, "5m")
+
+        # Live realtime OI is valid point-in-time at wall clock; for historical as_of use last completed hist.
+        is_live = abs(t - int(time.time() * 1000)) <= 5000
+        oi_current = self.oi_current
+        if not is_live:
+            series = oi5 or oi1h or oi1d
+            if series:
+                oi_current = float(series[-1].get("sumOpenInterest", oi_current or 0.0))
+
+        oi_delta_5m = 0.0
+        oi_change_pct = 0.0
+        if oi5 and len(oi5) >= 2:
+            prev_oi = float(oi5[-2]["sumOpenInterest"])
+            cur_oi = float(oi_current) if (is_live and oi_current) else float(oi5[-1]["sumOpenInterest"])
+            oi_delta_5m = round(cur_oi - prev_oi, 2)
+            oi_change_pct = round((oi_delta_5m / prev_oi) * 100.0, 3) if prev_oi > 0 else 0.0
+        elif is_live:
+            oi_delta_5m = self.oi_delta_5m
+            oi_change_pct = self.oi_change_pct
+
+        oi_delta_1h = 0.0
+        if oi1h and len(oi1h) >= 2:
+            prev = float(oi1h[-2]["sumOpenInterest"])
+            cur = float(oi_current) if (is_live and oi_current) else float(oi1h[-1]["sumOpenInterest"])
+            oi_delta_1h = round(cur - prev, 2)
+        elif is_live:
+            oi_delta_1h = self.oi_delta_1h
+
+        oi_delta_1d = 0.0
+        if oi1d and len(oi1d) >= 2:
+            prev = float(oi1d[-2]["sumOpenInterest"])
+            cur = float(oi_current) if (is_live and oi_current) else float(oi1d[-1]["sumOpenInterest"])
+            oi_delta_1d = round(cur - prev, 2)
+        elif is_live:
+            oi_delta_1d = self.oi_delta_1d
+
+        buy_sell_ratio_5m = self.buy_sell_ratio_5m
+        taker_buy = self.taker_buy_vol_5m
+        taker_sell = self.taker_sell_vol_5m
+        if taker:
+            latest = taker[-1]
+            taker_buy = round(float(latest.get("buyVol", taker_buy)), 2)
+            taker_sell = round(float(latest.get("sellVol", taker_sell)), 2)
+            buy_sell_ratio_5m = round(float(latest.get("buySellRatio", buy_sell_ratio_5m)), 4)
+
+        top_ls_ratio = self.top_ls_ratio
+        top_long_pct = self.top_long_pct
+        top_short_pct = self.top_short_pct
+        if top:
+            latest = top[-1]
+            top_long_pct = round(float(latest.get("longAccount", top_long_pct / 100.0)) * 100.0, 2)
+            top_short_pct = round(float(latest.get("shortAccount", top_short_pct / 100.0)) * 100.0, 2)
+            top_ls_ratio = round(float(latest.get("longShortRatio", top_ls_ratio)), 4)
+
+        global_ls_ratio = self.global_ls_ratio
+        if glob:
+            global_ls_ratio = round(float(glob[-1].get("longShortRatio", global_ls_ratio)), 4)
+
+        return {
+            "oi_current": oi_current,
+            "oi_delta_5m": oi_delta_5m,
+            "oi_delta_1h": oi_delta_1h,
+            "oi_delta_1d": oi_delta_1d,
+            "oi_change_pct": oi_change_pct,
+            "taker_buy_vol_5m": taker_buy,
+            "taker_sell_vol_5m": taker_sell,
+            "buy_sell_ratio_5m": buy_sell_ratio_5m,
+            "top_long_pct": top_long_pct,
+            "top_short_pct": top_short_pct,
+            "top_ls_ratio": top_ls_ratio,
+            "global_ls_ratio": global_ls_ratio,
+            "funding_rate": self.funding_rate,
+            "vol_ratio": self.vol_ratio,
+            "as_of_ms": t,
+        }
+
     def poll_price_and_klines(self):
+
         """
         价格与 5m K线获取策略：
         1. 优先使用 WebSocket 实时数据流 (毫秒级，无慢速 REST 延迟)；
@@ -374,11 +541,7 @@ class BinanceFuturesFeed:
                             self.klines = self.klines[-288:]
 
             with self.data_lock:
-                if len(self.klines) >= 20:
-                    vols = [float(k[5]) for k in self.klines[-21:-1]]
-                    self.vol_ma20 = sum(vols) / len(vols) if vols else 1.0
-                    cur_vol = float(self.klines[-1][5])
-                    self.vol_ratio = round(cur_vol / self.vol_ma20, 2) if self.vol_ma20 > 0 else 1.0
+                self._refresh_vol_ratio_closed()
 
             # 补充初始化 BTCUSDT 5m 行情 (每 120 秒刷新一次或首次启动补齐)
             if not self.btc_price or not self.btc_klines_5m or now - getattr(self, "_last_btc_kline_poll", 0) >= 120:
@@ -475,82 +638,70 @@ class BinanceFuturesFeed:
         }
 
     def poll_volume_and_oi(self, force=False):
-        """低频轮询：持仓量、OI Delta、主动买卖比、大户持仓多空比 (每 10-15 秒一次)"""
+        """低频轮询：持仓量、OI Delta、主动买卖比、大户持仓多空比 (每 10-15 秒一次)
+        AUDIT_FIX_ASOF_001: cache hist series; derive deltas from completed buckets (timestamp<=now).
+        """
         now = time.time()
         if not force and now - self.last_heavy_update < 12.0:
             return
 
         try:
-            # A. 实时持仓量 (Open Interest)
+            # A. 实时持仓量 (Open Interest) — point-in-time at wall clock
             oi_data = self._request("/fapi/v1/openInterest", {"symbol": self.symbol}, timeout=4)
             self.oi_current = float(oi_data.get("openInterest", 0.0))
 
-            # B. 5m 持仓量历史 (计算 5m OI Delta)
+            # B. 5m 持仓量历史 (计算 5m OI Delta) — keep series for as-of replay
             oi_hist = self._request("/futures/data/openInterestHist", {
-                "symbol": self.symbol, "period": "5m", "limit": 3
+                "symbol": self.symbol, "period": "5m", "limit": 30
             }, timeout=4)
-            if oi_hist and len(oi_hist) >= 2:
-                prev_oi = float(oi_hist[-2]["sumOpenInterest"])
-                cur_oi = float(oi_hist[-1]["sumOpenInterest"]) if not self.oi_current else self.oi_current
-                self.oi_delta_5m = round(cur_oi - prev_oi, 2)
-                self.oi_change_pct = round((self.oi_delta_5m / prev_oi) * 100.0, 3) if prev_oi > 0 else 0.0
+            if oi_hist:
+                self.oi_hist_5m = oi_hist
 
-            # B2. 1h 真实持仓量历史 (计算真实 1h OI Delta)
+            # B2. 1h 真实持仓量历史
             try:
                 oi_hist_1h = self._request("/futures/data/openInterestHist", {
-                    "symbol": self.symbol, "period": "1h", "limit": 3
+                    "symbol": self.symbol, "period": "1h", "limit": 30
                 }, timeout=4)
-                if oi_hist_1h and len(oi_hist_1h) >= 2:
-                    prev_oi_1h = float(oi_hist_1h[-2]["sumOpenInterest"])
-                    cur_oi_1h = float(oi_hist_1h[-1]["sumOpenInterest"]) if not self.oi_current else self.oi_current
-                    self.oi_delta_1h = round(cur_oi_1h - prev_oi_1h, 2)
+                if oi_hist_1h:
+                    self.oi_hist_1h = oi_hist_1h
             except Exception:
                 pass
 
-            # B3. 1d / 24h 真实持仓量历史 (计算真实 1d OI Delta)
+            # B3. 1d / 24h 真实持仓量历史
             try:
                 oi_hist_1d = self._request("/futures/data/openInterestHist", {
-                    "symbol": self.symbol, "period": "1d", "limit": 3
+                    "symbol": self.symbol, "period": "1d", "limit": 14
                 }, timeout=4)
-                if oi_hist_1d and len(oi_hist_1d) >= 2:
-                    prev_oi_1d = float(oi_hist_1d[-2]["sumOpenInterest"])
-                    cur_oi_1d = float(oi_hist_1d[-1]["sumOpenInterest"]) if not self.oi_current else self.oi_current
-                    self.oi_delta_1d = round(cur_oi_1d - prev_oi_1d, 2)
+                if oi_hist_1d:
+                    self.oi_hist_1d = oi_hist_1d
             except Exception:
                 pass
 
-            # C. 5m 主动买卖量 (Taker Buy/Sell Volume & Ratio)
+            # C. 5m 主动买卖量
             taker_hist = self._request("/futures/data/takerlongshortRatio", {
-                "symbol": self.symbol, "period": "5m", "limit": 2
+                "symbol": self.symbol, "period": "5m", "limit": 30
             }, timeout=4)
-            if taker_hist and len(taker_hist) >= 1:
-                latest_taker = taker_hist[-1]
-                self.taker_buy_vol_5m = round(float(latest_taker["buyVol"]), 2)
-                self.taker_sell_vol_5m = round(float(latest_taker["sellVol"]), 2)
-                self.buy_sell_ratio_5m = round(float(latest_taker["buySellRatio"]), 4)
+            if taker_hist:
+                self.taker_hist_5m = taker_hist
 
-            # D. 大户持仓量多空比 (Top Trader Long/Short Position Ratio)
+            # D. 大户持仓量多空比
             top_hist = self._request("/futures/data/topLongShortPositionRatio", {
-                "symbol": self.symbol, "period": "5m", "limit": 2
+                "symbol": self.symbol, "period": "5m", "limit": 30
             }, timeout=4)
-            if top_hist and len(top_hist) >= 1:
-                latest_top = top_hist[-1]
-                self.top_long_pct = round(float(latest_top["longAccount"]) * 100.0, 2)
-                self.top_short_pct = round(float(latest_top["shortAccount"]) * 100.0, 2)
-                self.top_ls_ratio = round(float(latest_top["longShortRatio"]), 4)
+            if top_hist:
+                self.top_ls_hist_5m = top_hist
 
-            # E. 全网散户/大户账户多空比 (Global Long/Short Account Ratio 真实拉取)
+            # E. 全网账户多空比
             try:
                 global_hist = self._request("/futures/data/globalLongShortAccountRatio", {
-                    "symbol": self.symbol, "period": "5m", "limit": 2
+                    "symbol": self.symbol, "period": "5m", "limit": 30
                 }, timeout=4)
-                if global_hist and len(global_hist) >= 1:
-                    latest_global = global_hist[-1]
-                    self.global_ls_ratio = round(float(latest_global.get("longShortRatio", 1.0)), 4)
+                if global_hist:
+                    self.global_ls_hist_5m = global_hist
             except Exception:
                 pass
 
-            # F. 实时资金费率 (Funding Rate 真实拉取)
+            # F. 实时资金费率
             try:
                 funding_info = self._request("/fapi/v1/premiumIndex", {
                     "symbol": self.symbol
@@ -559,6 +710,20 @@ class BinanceFuturesFeed:
                     self.funding_rate = round(float(funding_info["lastFundingRate"]), 6)
             except Exception:
                 pass
+
+            # Derive live fields from completed buckets + realtime OI (as-of now)
+            micro = self.get_microstructure_asof(as_of_ms=int(now * 1000))
+            self.oi_delta_5m = micro["oi_delta_5m"]
+            self.oi_change_pct = micro["oi_change_pct"]
+            self.oi_delta_1h = micro["oi_delta_1h"]
+            self.oi_delta_1d = micro["oi_delta_1d"]
+            self.taker_buy_vol_5m = micro["taker_buy_vol_5m"]
+            self.taker_sell_vol_5m = micro["taker_sell_vol_5m"]
+            self.buy_sell_ratio_5m = micro["buy_sell_ratio_5m"]
+            self.top_long_pct = micro["top_long_pct"]
+            self.top_short_pct = micro["top_short_pct"]
+            self.top_ls_ratio = micro["top_ls_ratio"]
+            self.global_ls_ratio = micro["global_ls_ratio"]
 
             self.last_heavy_update = now
         except Exception as e:
@@ -588,29 +753,36 @@ class BinanceFuturesFeed:
         except Exception:
             pass
 
-    def calc_daily_vwap(self):
+    def calc_daily_vwap(self, as_of_ms=None):
         """
-        计算今日北京时间 00:00 (UTC+8) 至今的日内真实 Daily VWAP 及 ±1σ/±2σ/±3σ 轨道
+        计算今日北京时间 00:00 (UTC+8) 至 as_of T 的日内真实 Daily VWAP 及 ±1σ/±2σ/±3σ 轨道
+        AUDIT_FIX_ASOF_001: only closed 5m bars; accumulate day-start -> T (no end-of-window leak).
         """
-        if not self.klines:
+        closed = self.get_closed_klines("5m", as_of_ms=as_of_ms)
+        if not closed:
             return None
-        now_bjt = datetime.now(TZ_BJT)
-        today_start_ms = int(datetime(now_bjt.year, now_bjt.month, now_bjt.day, tzinfo=TZ_BJT).timestamp() * 1000)
+        t_ms = int(as_of_ms) if as_of_ms is not None else int(time.time() * 1000)
+        if day_start_ms_bjt is not None:
+            today_start_ms = day_start_ms_bjt(t_ms)
+        else:
+            now_bjt = datetime.fromtimestamp(t_ms / 1000.0, tz=TZ_BJT)
+            today_start_ms = int(datetime(now_bjt.year, now_bjt.month, now_bjt.day, tzinfo=TZ_BJT).timestamp() * 1000)
 
-        # 筛选今天北京时间 00:00 起的 K线
-        today_ks = [k for k in self.klines if k[0] >= today_start_ms]
+        today_ks = [k for k in closed if k[0] >= today_start_ms]
         if len(today_ks) < 12:
-            today_ks = self.klines[-48:]
+            today_ks = closed[-48:]
 
         cum_vol = 0.0
         cum_tp_vol = 0.0
         kl_data = []
+        vwap_series = []
         for k in today_ks:
             h, l, c, v = float(k[2]), float(k[3]), float(k[4]), float(k[5])
             tp = (h + l + c) / 3.0
             cum_vol += v
             cum_tp_vol += tp * v
             kl_data.append((tp, v))
+            vwap_series.append((cum_tp_vol / cum_vol) if cum_vol > 0 else c)
 
         if cum_vol <= 0:
             return None
@@ -619,9 +791,9 @@ class BinanceFuturesFeed:
         sum_sq = sum(v * ((tp - vwap) ** 2) for tp, v in kl_data)
         sigma = math.sqrt(sum_sq / cum_vol)
         sigma_round = round(sigma, 2)
-        cur_px = float(today_ks[-1][4])
+        cur_px = float(self.price) if self.price else float(today_ks[-1][4])
         z_score = round((cur_px - vwap) / sigma, 3) if sigma > 0 else 0.0
-        slope = round(float(today_ks[-1][4]) - float(today_ks[-6][4]), 2) if len(today_ks) >= 6 else 0.0
+        slope = round(vwap_series[-1] - vwap_series[-6], 2) if len(vwap_series) >= 6 else 0.0
 
         u1 = round(vwap + sigma, 2)
         l1 = round(vwap - sigma, 2)
@@ -644,10 +816,11 @@ class BinanceFuturesFeed:
             "mid_upper": mid_upper,
             "mid_lower": mid_lower,
             "n_candles": len(today_ks),
-            "source": "Binance Daily VWAP (北京 00:00)",
+            "source": "Binance Daily VWAP (北京 00:00, closed bars as-of-T)",
             "updated_at": datetime.now().isoformat(timespec="seconds"),
             "age": 0,
             "stale": False,
+            "as_of_ms": t_ms,
         }
 
     def get_market_sentiment(self):

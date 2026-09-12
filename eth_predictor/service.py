@@ -19,8 +19,11 @@ from pathlib import Path
 from eth_predictor.models import ETHPredictor
 from eth_predictor.optimizer import PredictionOptimizer
 from eth_predictor.storage import PredictionStorage
-from eth_predictor.indicators import safe_float
+from eth_predictor.indicators import safe_float, calc_daily_vwap
 from eth_predictor.macro_events import MacroEventManager
+from eth_predictor.asof import (
+    filter_closed_klines, resolve_liq_snapshot, load_liq_history_from_data_dir, now_ms,
+)
 
 TZ_BJT = timezone(timedelta(hours=8))
 
@@ -45,18 +48,126 @@ class PredictorService:
         self.latest_predictions = {}
         self._running = False
         self._liq_cache = {}
+        self._liq_history_cache = []
+        self._liq_history_loaded_at = 0.0
 
-    def load_liq_data(self):
-        """读取最新清算地图数据"""
+    def load_liq_data(self, as_of_ms=None):
+        """读取清算地图；as-of-T 仅用 fetched_ts <= T，否则禁用 (AUDIT_FIX_ASOF_001)。"""
+        latest = None
         try:
             if self.liq_path.exists():
                 data = json.loads(self.liq_path.read_text(encoding="utf-8"))
                 if data:
+                    if "fetched_ts" not in data:
+                        try:
+                            data["fetched_ts"] = int(self.liq_path.stat().st_mtime * 1000)
+                            data["_asof_mtime_fallback"] = True
+                        except Exception:
+                            pass
                     self._liq_cache = data
-                return data
+                    latest = data
         except Exception:
-            pass
-        return self._liq_cache
+            latest = None
+        if latest is None:
+            latest = self._liq_cache
+
+        # Refresh decrypted history index occasionally for replay/as-of
+        now = time.time()
+        if now - self._liq_history_loaded_at > 120.0 or not self._liq_history_cache:
+            try:
+                data_dir = Path(self.liq_path).resolve().parent.parent  # data/
+                self._liq_history_cache = load_liq_history_from_data_dir(data_dir, limit=200)
+                self._liq_history_loaded_at = now
+            except Exception:
+                pass
+
+        return resolve_liq_snapshot(
+            latest,
+            as_of_ms=as_of_ms,
+            history=self._liq_history_cache,
+            allow_unstamped_live=True,
+        )
+
+    def _build_market_snapshot(self, as_of_ms=None):
+        """Assemble prediction snapshot with closed-bar / as-of filters only."""
+        t_ms = now_ms(as_of_ms)
+        feed = self.feed
+        price = getattr(feed, "price", None)
+
+        get_closed = getattr(feed, "get_closed_klines", None)
+        if callable(get_closed):
+            kl_5m = get_closed("5m", as_of_ms=t_ms)
+            kl_1h = get_closed("1h", as_of_ms=t_ms)
+            kl_1d = get_closed("1d", as_of_ms=t_ms)
+        else:
+            kl_5m = filter_closed_klines(getattr(feed, "klines", []), as_of_ms=t_ms, interval="5m")
+            kl_1h = filter_closed_klines(getattr(feed, "klines_1h", []), as_of_ms=t_ms, interval="1h")
+            kl_1d = filter_closed_klines(getattr(feed, "klines_1d", []), as_of_ms=t_ms, interval="1d")
+
+        # Raw (may include forming bar) — lifecycle TP/SL tracking only
+        kl_5m_raw = list(getattr(feed, "klines", []) or [])
+        kl_1h_raw = list(getattr(feed, "klines_1h", []) or [])
+        kl_1d_raw = list(getattr(feed, "klines_1d", []) or [])
+
+        micro_fn = getattr(feed, "get_microstructure_asof", None)
+        if callable(micro_fn):
+            micro = micro_fn(as_of_ms=t_ms)
+        else:
+            micro = {
+                "oi_current": getattr(feed, "oi_current", 0.0),
+                "oi_delta_5m": getattr(feed, "oi_delta_5m", 0.0),
+                "oi_delta_1h": getattr(feed, "oi_delta_1h", 0.0),
+                "oi_delta_1d": getattr(feed, "oi_delta_1d", 0.0),
+                "vol_ratio": getattr(feed, "vol_ratio", 1.0),
+                "buy_sell_ratio_5m": getattr(feed, "buy_sell_ratio_5m", 1.0),
+                "top_ls_ratio": getattr(feed, "top_ls_ratio", 1.0),
+                "global_ls_ratio": getattr(feed, "global_ls_ratio", 1.0),
+                "funding_rate": getattr(feed, "funding_rate", 0.0001),
+            }
+
+        vwap_fn = getattr(feed, "calc_daily_vwap", None)
+        if callable(vwap_fn):
+            try:
+                vwap_daily = vwap_fn(as_of_ms=t_ms)
+            except TypeError:
+                vwap_daily = vwap_fn()
+        else:
+            vwap_daily = calc_daily_vwap(kl_5m, as_of_ms=t_ms, price=price)
+
+        liq_data = self.load_liq_data(as_of_ms=t_ms)
+        rt_liq = getattr(feed, "get_realtime_liquidation_stats", lambda: {})()
+        # Realtime forceOrder stream: filter events with time <= as_of
+        if isinstance(rt_liq, dict) and as_of_ms is not None:
+            # stats already windowed to recent; for historical as_of, zero if not live
+            if abs(t_ms - int(time.time() * 1000)) > 5000:
+                rt_liq = {}
+
+        btc_lead = getattr(feed, "get_btc_lead_lag_stats", lambda: {})()
+
+        return {
+            "price": price,
+            "as_of_ms": t_ms,
+            "klines_5m": kl_5m,
+            "klines_1h": kl_1h,
+            "klines_1d": kl_1d,
+            "klines_5m_raw": kl_5m_raw,
+            "klines_1h_raw": kl_1h_raw,
+            "klines_1d_raw": kl_1d_raw,
+            "oi_current": micro.get("oi_current", 0.0),
+            "oi_delta_5m": micro.get("oi_delta_5m", 0.0),
+            "oi_delta_1h": micro.get("oi_delta_1h", 0.0),
+            "oi_delta_1d": micro.get("oi_delta_1d", 0.0),
+            "vol_ratio": micro.get("vol_ratio", getattr(feed, "vol_ratio", 1.0)),
+            "buy_sell_ratio_5m": micro.get("buy_sell_ratio_5m", 1.0),
+            "top_ls_ratio": micro.get("top_ls_ratio", 1.0),
+            "global_ls_ratio": micro.get("global_ls_ratio", 1.0),
+            "funding_rate": micro.get("funding_rate", 0.0001),
+            "vwap_daily": vwap_daily,
+            "liq_raw_data": liq_data,
+            "macro_events": self.macro_events,
+            "realtime_liquidations": rt_liq,
+            "btc_lead_lag": btc_lead,
+        }
 
     def _fetch_macro_background(self):
         try:
@@ -81,32 +192,12 @@ class PredictorService:
             self._last_macro_fetch = now
             threading.Thread(target=self._fetch_macro_background, daemon=True).start()
 
-        # 1. 组装盘口数据快照并由生命周期状态机驱动 (触及 TP1、TP2、SL 或超时)
-        liq_data = self.load_liq_data()
-        rt_liq = getattr(self.feed, "get_realtime_liquidation_stats", lambda: {})()
-        btc_lead = getattr(self.feed, "get_btc_lead_lag_stats", lambda: {})()
-        snapshot = {
-            "price": price,
-            "klines_5m": getattr(self.feed, "klines", []),
-            "klines_1h": getattr(self.feed, "klines_1h", []),
-            "klines_1d": getattr(self.feed, "klines_1d", []),
-            "oi_current": getattr(self.feed, "oi_current", 0.0),
-            "oi_delta_5m": getattr(self.feed, "oi_delta_5m", 0.0),
-            "oi_delta_1h": getattr(self.feed, "oi_delta_1h", 0.0),
-            "oi_delta_1d": getattr(self.feed, "oi_delta_1d", 0.0),
-            "vol_ratio": getattr(self.feed, "vol_ratio", 1.0),
-            "buy_sell_ratio_5m": getattr(self.feed, "buy_sell_ratio_5m", 1.0),
-            "top_ls_ratio": getattr(self.feed, "top_ls_ratio", 1.0),
-            "global_ls_ratio": getattr(self.feed, "global_ls_ratio", 1.0),
-            "funding_rate": getattr(self.feed, "funding_rate", 0.0001),
-            "liq_raw_data": liq_data,
-            "macro_events": self.macro_events,
-            "realtime_liquidations": rt_liq,
-            "btc_lead_lag": btc_lead,
-        }
+        # 1. 组装盘口数据快照 (closed-bar / as-of-T) 并由生命周期状态机驱动
+        snapshot = self._build_market_snapshot()
 
         # 核心：实时状态机检验（追踪 TP1 -> 二次推算 -> 冲刺 TP2 / 止损 / 偏离核验）
-        self.lifecycle.update_ticks(price, getattr(self.feed, "klines", []), snapshot)
+        # Pass raw klines for intrabar TP/SL extreme tracking (outcome, not features).
+        self.lifecycle.update_ticks(price, snapshot.get("klines_5m_raw") or getattr(self.feed, "klines", []), snapshot)
         self.latest_predictions = self.lifecycle.get_display_state(price)
 
         # 2. 定周期检测 12 小时实盘自动复盘日志 (每 60 秒轻量核查一次)
@@ -143,22 +234,7 @@ class PredictorService:
 
         # 立即以当前现价重新初始化新目标
         price = self.feed.price or 2500.0
-        liq_data = self.load_liq_data()
-        snapshot = {
-            "price": price,
-            "klines_5m": getattr(self.feed, "klines", []),
-            "klines_1h": getattr(self.feed, "klines_1h", []),
-            "klines_1d": getattr(self.feed, "klines_1d", []),
-            "oi_current": getattr(self.feed, "oi_current", 0.0),
-            "oi_delta_5m": getattr(self.feed, "oi_delta_5m", 0.0),
-            "oi_delta_1h": getattr(self.feed, "oi_delta_1h", 0.0),
-            "buy_sell_ratio_5m": getattr(self.feed, "buy_sell_ratio_5m", 1.0),
-            "top_ls_ratio": getattr(self.feed, "top_ls_ratio", 1.0),
-            "global_ls_ratio": getattr(self.feed, "global_ls_ratio", 1.0),
-            "funding_rate": getattr(self.feed, "funding_rate", 0.0001),
-            "liq_raw_data": liq_data,
-            "macro_events": self.macro_events,
-        }
+        snapshot = self._build_market_snapshot()
         self.lifecycle.ensure_active_predictions(snapshot)
         self.latest_predictions = self.lifecycle.get_display_state(price)
         print("[*] 历史预测已完全重置，新阶段追踪器已全部启动！", flush=True)
@@ -176,10 +252,10 @@ class PredictorService:
         # 计算当前各项胜率指标
         metrics = self.optimizer.compute_accuracy_metrics(self.storage.load_history(limit=1000))
 
-        # 清算地图核心档位摘要
+        # 清算地图核心档位摘要 (as-of now; disabled if no valid snapshot)
         liq_data = self.load_liq_data()
         from eth_predictor.indicators import calc_liquidation_gravity
-        liq_summary = calc_liquidation_gravity(self.feed.price, liq_data)
+        liq_summary = calc_liquidation_gravity(self.feed.price, liq_data if not liq_data.get("_liq_disabled") else {})
 
         return {
             "latest_predictions": self.latest_predictions,

@@ -187,22 +187,32 @@ def calc_adaptive_exhaustion(bb_bands, rsi):
     }
 
 
-def calc_daily_vwap(klines_5m, tz_offset_hours=8):
+def calc_daily_vwap(klines_5m, tz_offset_hours=8, as_of_ms=None, price=None):
     """
     计算北京时间 00:00 起算的高精度日内 Daily VWAP 及其多层标准差轨道与斜率
     klines_5m: [[open_ms, o, h, l, c, vol, close_ms, q_vol, trades, taker_base, taker_quote], ...]
+
+    AUDIT_FIX_ASOF_001:
+      - Only closed bars (close_time <= as_of_ms) contribute H/L/C/V.
+      - Accumulate from day 00:00 (BJT) to as_of T — never use end-of-window VWAP for earlier T.
     """
     if not klines_5m or len(klines_5m) < 3:
         return None
 
-    tz = timezone(timedelta(hours=tz_offset_hours))
-    now_tz = datetime.now(tz)
-    today_start_ms = int(datetime(now_tz.year, now_tz.month, now_tz.day, tzinfo=tz).timestamp() * 1000)
+    from eth_predictor.asof import (
+        filter_closed_klines, day_start_ms_bjt, now_ms,
+    )
 
-    today_ks = [k for k in klines_5m if safe_float(k[0]) >= today_start_ms]
+    t_ms = now_ms(as_of_ms)
+    closed = filter_closed_klines(klines_5m, as_of_ms=t_ms, interval="5m")
+    if len(closed) < 3:
+        return None
+
+    today_start_ms = day_start_ms_bjt(t_ms)
+    today_ks = [k for k in closed if safe_float(k[0]) >= today_start_ms]
     if len(today_ks) < 12:
-        # 如果当天开盘时间不足 1 小时 (例如凌晨刚开盘)，回退补充最近 48 根 5m K 线作为平滑过渡
-        today_ks = klines_5m[-48:]
+        # 如果当天开盘时间不足 1 小时 (例如凌晨刚开盘)，回退补充最近 48 根已收盘 5m K 线作为平滑过渡
+        today_ks = closed[-48:]
 
     cum_vol = 0.0
     cum_tp_vol = 0.0
@@ -230,7 +240,10 @@ def calc_daily_vwap(klines_5m, tz_offset_hours=8):
     sum_sq = sum(v * ((tp - vwap) ** 2) for tp, v in kl_data)
     sigma = math.sqrt(sum_sq / cum_vol) if cum_vol > 0 else 1.0
 
-    current_price = safe_float(today_ks[-1][4])
+    # z-score vs live/as-of price when provided; else last closed close
+    current_price = safe_float(price) if price is not None else safe_float(today_ks[-1][4])
+    if current_price <= 0:
+        current_price = safe_float(today_ks[-1][4])
     z_score = round((current_price - vwap) / sigma, 3) if sigma > 0 else 0.0
 
     # 计算近 6 根 K 线 (30分钟) 的 VWAP 斜率
@@ -257,6 +270,7 @@ def calc_daily_vwap(klines_5m, tz_offset_hours=8):
         "mid_lower": round((l1 + l2) / 2.0, 2),
         "n_candles": len(today_ks),
         "price": current_price,
+        "as_of_ms": t_ms,
     }
 
 
@@ -636,8 +650,9 @@ def calc_positioning_sentiment(top_ls_ratio, top_acc_ratio, global_ls_ratio, tak
 def calc_liquidation_gravity(current_price, liq_raw_data, gamma=1.2):
     """
     清算地图重力引力模型 (Liquidation Gravitational Attraction Engine)
+    AUDIT_FIX_ASOF_001: if snapshot disabled / missing data list, return neutral (no invented future).
     """
-    if not current_price or not liq_raw_data:
+    if not current_price or not liq_raw_data or liq_raw_data.get("_liq_disabled") or not isinstance(liq_raw_data.get("data"), list):
         return {
             "net_direction": "NEUTRAL",
             "net_score": 0.0,

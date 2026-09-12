@@ -376,7 +376,8 @@ class PredictionLifecycleManager:
             candle_high = current_price
             candle_low = current_price
 
-            klines_5m = market_snapshot.get("klines_5m") or current_klines_5m or []
+            # Prefer raw (incl. forming) bars for outcome extremes; features stay closed-only in predict().
+            klines_5m = market_snapshot.get("klines_5m_raw") or market_snapshot.get("klines_5m") or current_klines_5m or []
             if klines_5m:
                 for k in reversed(klines_5m[-48:]):
                     k_open_sec = float(k[0]) / 1000.0
@@ -385,7 +386,7 @@ class PredictionLifecycleManager:
                         candle_low = min(candle_low, float(k[3]))
 
             if tf in ("1h", "1d"):
-                klines_1h = market_snapshot.get("klines_1h") or []
+                klines_1h = market_snapshot.get("klines_1h_raw") or market_snapshot.get("klines_1h") or []
                 if klines_1h:
                     for k in reversed(klines_1h[-48:]):
                         k_open_sec = float(k[0]) / 1000.0
@@ -394,7 +395,7 @@ class PredictionLifecycleManager:
                             candle_low = min(candle_low, float(k[3]))
 
             if tf == "1d":
-                klines_1d = market_snapshot.get("klines_1d") or []
+                klines_1d = market_snapshot.get("klines_1d_raw") or market_snapshot.get("klines_1d") or []
                 if klines_1d:
                     for k in reversed(klines_1d[-14:]):
                         k_open_sec = float(k[0]) / 1000.0
