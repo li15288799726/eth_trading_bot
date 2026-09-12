@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Logs & Temporary debug
+*.log
+auto_trading.log
+_img_analysis_tmp/
+.ms-playwright/
+
+# Sensitive credentials, cookies & tokens
+coinglass_auth.json
+coinglass_cookies_auth.json
+coinglass_cookies.json
+coinglass_manual.json
+.env
+.env.local
+
+# Runtime local data & captures
+data/
+test_data/
+*.sqlite3
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak*
+*.v2.*

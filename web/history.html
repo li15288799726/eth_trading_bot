@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ETH 历史预测全景档案库 · 二级明细页面</title>
+<style>
+  :root {
+    --bg: #0b0f16;
+    --panel: #111520;
+    --panel2: #161b26;
+    --panel3: #1d2332;
+    --border: #222b40;
+    --text: #e1e7f0;
+    --muted: #7b879d;
+    --accent: #4f8cff;
+    --up: #26a69a;
+    --down: #ef5350;
+    --gold: #f59e0b;
+    --purple: #a78bfa;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 16px 24px 40px;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* 顶栏导航 */
+  .topbar {
+    display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 20px; margin-bottom: 16px; box-shadow: 0 4px 20px rgba(0,0,0,.35);
+  }
+  .brand-box { display: flex; align-items: center; gap: 14px; }
+  .brand-logo {
+    width: 38px; height: 38px; border-radius: 10px;
+    background: linear-gradient(135deg, #4f8cff, #a78bfa);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 900; font-size: 18px; color: #fff; box-shadow: 0 0 12px rgba(79,140,255,.5);
+  }
+  .brand-title h1 { font-size: 16px; font-weight: 800; display: flex; align-items: center; gap: 8px; }
+  .brand-title small { color: var(--muted); font-size: 11px; }
+
+  .actions { display: flex; align-items: center; gap: 10px; }
+  .btn {
+    background: var(--accent); color: #fff; border: none; padding: 7px 14px; border-radius: 8px;
+    font-size: 12px; font-weight: 600; cursor: pointer; transition: all .2s;
+    display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
+  }
+  .btn:hover { background: #3b7ced; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(79,140,255,.4); text-decoration: none; }
+  .btn.secondary { background: var(--panel2); border: 1px solid var(--border); color: var(--text); }
+  .btn.secondary:hover { background: var(--panel3); border-color: var(--accent); }
+  .btn.danger { background: rgba(239,83,80,.15); border: 1px solid rgba(239,83,80,.4); color: var(--down); }
+  .btn.danger:hover { background: var(--down); color: #fff; }
+
+  /* 汇总指标卡片 */
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px;
+  }
+  @media(max-width: 1200px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
+  @media(max-width: 600px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 3px;
+  }
+  .stat-card .lbl { font-size: 10.5px; color: var(--muted); font-weight: 600; }
+  .stat-card .val { font-size: 18px; font-weight: 800; font-family: Consolas, monospace; }
+  .stat-card .sub { font-size: 10px; color: var(--muted); }
+
+  /* 过滤控制栏 */
+  .filter-bar {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 16px; display: flex; justify-content: space-between;
+    align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .filter-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .filter-label { font-size: 11px; color: var(--muted); font-weight: 600; }
+  .pill-btn {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--muted);
+    padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer;
+    transition: all .2s;
+  }
+  .pill-btn:hover { background: var(--panel3); color: var(--text); border-color: var(--accent); }
+  .pill-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .search-input {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 12px; color: var(--text); font-size: 11.5px; outline: none; width: 180px;
+  }
+  .search-input:focus { border-color: var(--accent); }
+
+  /* 历史数据列表 */
+  .table-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,.25);
+  }
+  .table-header {
+    padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex;
+    justify-content: space-between; align-items: center;
+  }
+  .table-header h3 { font-size: 13px; font-weight: 700; color: var(--text); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  th {
+    background: rgba(0,0,0,.25); color: var(--muted); text-align: left;
+    padding: 10px 14px; font-weight: 600; border-bottom: 1px solid var(--border);
+    white-space: nowrap; font-size: 10.5px; letter-spacing: .5px;
+  }
+  td {
+    padding: 11px 14px; border-bottom: 1px solid rgba(35,42,58,.5);
+    white-space: nowrap; vertical-align: middle;
+  }
+  tr.row-main { cursor: pointer; transition: background .2s; }
+  tr.row-main:hover { background: rgba(79,140,255,.05); }
+  tr.row-main.expanded { background: rgba(79,140,255,.08); }
+
+  /* 展开详情卡片 */
+  tr.row-detail { display: none; background: #131824; }
+  tr.row-detail.show { display: table-row; }
+  tr.row-detail td { white-space: normal; padding: 0; }
+  .detail-box {
+    padding: 16px 20px; border-left: 3px solid var(--accent);
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+    white-space: normal;
+  }
+  @media(max-width: 1100px) { .detail-box { grid-template-columns: repeat(2, 1fr); } }
+  @media(max-width: 650px) { .detail-box { grid-template-columns: 1fr; } }
+
+  .detail-sec {
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .detail-sec-title { font-size: 11px; font-weight: 700; color: var(--accent); display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+  .detail-kv { display: flex; justify-content: space-between; font-size: 11px; }
+  .detail-kv .k { color: var(--muted); }
+  .detail-kv .v { font-family: Consolas, monospace; font-weight: 600; }
+
+  /* 徽章与数字 */
+  .badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; }
+  .badge.success { background: rgba(38,166,154,.15); color: var(--up); border: 1px solid rgba(38,166,154,.3); }
+  .badge.danger { background: rgba(239,83,80,.15); color: var(--down); border: 1px solid rgba(239,83,80,.3); }
+  .badge.warn { background: rgba(245,158,11,.15); color: var(--gold); border: 1px solid rgba(245,158,11,.3); }
+  .badge.pending { background: rgba(79,140,255,.15); color: var(--accent); border: 1px solid rgba(79,140,255,.3); }
+
+  .num { font-family: Consolas, monospace; }
+  .up { color: var(--up); }
+  .down { color: var(--down); }
+  .neutral { color: var(--gold); }
+  .muted { color: var(--muted); }
+
+  /* 模态弹窗 */
+  .modal {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,.7);
+    z-index: 999; display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal.open { display: flex; }
+  .modal-box {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    width: 100%; max-width: 440px; padding: 20px; box-shadow: 0 10px 40px rgba(0,0,0,.6);
+  }
+  .modal-box h3 { font-size: 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .modal-box p { font-size: 12px; color: var(--muted); line-height: 1.6; margin-bottom: 16px; }
+  .modal-footer { display: flex; justify-content: flex-end; gap: 10px; }
+</style>
+</head>
+<body>
+
+  <!-- 顶栏导航 -->
+  <div class="topbar">
+    <div class="brand-box">
+      <div class="brand-logo">ETH</div>
+      <div class="brand-title">
+        <h1>📑 历史预测全景档案库 · 二级明细页面</h1>
+        <small>全生命周期状态跟踪 · 目标达成验真 · 触线复盘日志</small>
+      </div>
+    </div>
+    <div class="actions">
+      <a href="/" class="btn secondary">← 返回主控制台</a>
+      <button class="btn secondary" onclick="refreshHistory()">🔄 刷新列表</button>
+      <button class="btn secondary" onclick="exportJSON()">📥 导出 JSON</button>
+      <button class="btn danger" onclick="openResetModal()">🗑️ 重置历史预测</button>
+    </div>
+  </div>
+
+  <!-- 6大指标统计总览 -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="lbl">累计历史预测样本</div>
+      <div class="val" id="statTotal">-- 次</div>
+      <div class="sub" id="statSubTotal">已验真: -- · 待验: --</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">综合有效胜率</div>
+      <div class="val up" id="statWinRate">--%</div>
+      <div class="sub" id="statSubWin">正确: -- / -- 笔</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">🏆 双目标大胜 (TP1+TP2)</div>
+      <div class="val up" id="statFullWin">-- 笔</div>
+      <div class="sub">双阶段极限达成</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">✅ 阶段胜单 (TP1胜/TP2败)</div>
+      <div class="val up" id="statPartialWin">-- 笔</div>
+      <div class="sub">第一目标达成锁定</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">🛑 触及止损出局</div>
+      <div class="val down" id="statSlFail">-- 笔</div>
+      <div class="sub">方向偏差止损出清</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">⏱️ 超时保护 (归失败项)</div>
+      <div class="val" id="statTimeoutFail" style="color:var(--gold)">-- 笔</div>
+      <div class="sub">超时未决锁定失败</div>
+    </div>
+  </div>
+
+  <!-- 检索与筛选过滤栏 -->
+  <div class="filter-bar">
+    <div class="filter-group">
+      <span class="filter-label">周期筛选:</span>
+      <button class="pill-btn active" onclick="setTfFilter('ALL', this)">全部</button>
+      <button class="pill-btn" onclick="setTfFilter('5m', this)">5M 极短线</button>
+      <button class="pill-btn" onclick="setTfFilter('1h', this)">1H 日内波段</button>
+      <button class="pill-btn" onclick="setTfFilter('1d', this)">1D 宏观趋势</button>
+    </div>
+
+    <div class="filter-group">
+      <span class="filter-label">作战结局:</span>
+      <button class="pill-btn active" onclick="setOutcomeFilter('ALL', this)">全部</button>
+      <button class="pill-btn" onclick="setOutcomeFilter('FULL_WIN', this)">🏆 双目标大胜</button>
+      <button class="pill-btn" onclick="setOutcomeFilter('TP1_WIN_TP2_FAILED', this)">✅ 阶段胜利单</button>
+      <button class="pill-btn" onclick="setOutcomeFilter('DEVIATION_STOP', this)">⚠️ 趋势偏离离场</button>
+      <button class="pill-btn" onclick="setOutcomeFilter('SL_FAILED', this)">🛑 触及止损</button>
+      <button class="pill-btn" onclick="setOutcomeFilter('TIMEOUT_FAILED', this)">⏱️ 超时失效</button>
+    </div>
+
+    <div class="filter-group">
+      <input type="text" id="searchInput" class="search-input" placeholder="🔍 搜索单号 / 方向 / 价格..." oninput="renderTable()">
+    </div>
+  </div>
+
+  <!-- 详细历史流水表格 -->
+  <div class="table-card">
+    <div class="table-header">
+      <h3>📋 预测作战流水与执行明细清单 (点击单行可展开深度推算与轨迹)</h3>
+      <span class="muted" style="font-size:11px" id="recordCountText">共 0 条历史记录</span>
+    </div>
+
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:30px"></th>
+            <th>预测时间</th>
+            <th>周期</th>
+            <th>方向</th>
+            <th>置信度</th>
+            <th>进场基准</th>
+            <th>目标位 (TP1 / TP2)</th>
+            <th>失效防守 (SL)</th>
+            <th>结算价</th>
+            <th>盈亏 (PnL)</th>
+            <th>作战结局</th>
+            <th>终结说明</th>
+          </tr>
+        </thead>
+        <tbody id="historyTableBody">
+          <tr><td colspan="12" class="muted" style="text-align:center;padding:24px">正在加载历史预测详细档案...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 重置确认模态窗 -->
+  <div class="modal" id="resetModal">
+    <div class="modal-box">
+      <h3>⚠️ 确认重置所有历史预测？</h3>
+      <p>
+        此操作将：<br>
+        1. 自动将当前历史记录备份至 <code>data/predictions/</code> 文件。<br>
+        2. 清空历史流水数据库。<br>
+        3. 重置实盘复盘各项胜率与检验统计为初始状态。<br>
+        4. 以当前最新市价重新开启全新的 5M / 1H / 1D 目标追踪作战任务。<br><br>
+        重置后无法撤销，确定执行吗？
+      </p>
+      <div class="modal-footer">
+        <button class="btn secondary" onclick="closeResetModal()">取消</button>
+        <button class="btn danger" onclick="confirmReset()">确认彻底重置</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+let rawHistory = [];
+let currentTf = 'ALL';
+let currentOutcome = 'ALL';
+let expandedRows = new Set();
+
+async function loadHistoryData() {
+  try {
+    const r = await fetch('/api/prediction/history?limit=1000');
+    const data = await r.json();
+    rawHistory = data.history || [];
+    renderStats(data.metrics || {});
+    renderTable();
+  } catch(e) {
+    console.error("加载历史档案失败:", e);
+    document.getElementById("historyTableBody").innerHTML = `<tr><td colspan="12" class="muted" style="text-align:center;padding:24px;color:var(--down)">加载历史失败: ${e.message}</td></tr>`;
+  }
+}
+
+function refreshHistory() {
+  loadHistoryData();
+}
+
+function renderStats(metrics) {
+  const s = metrics.summary || {};
+  const total = rawHistory.length;
+  const verified = rawHistory.filter(h => h.status === 'VERIFIED').length;
+  const pending = total - verified;
+
+  document.getElementById("statTotal").innerText = `${total} 笔`;
+  document.getElementById("statSubTotal").innerText = `已验真: ${verified} · 待验: ${pending}`;
+
+  let fullWins = 0, partialWins = 0, slFails = 0, timeoutFails = 0, wins = 0;
+  rawHistory.forEach(h => {
+    const res = h.verified_result || {};
+    const outcome = res.outcome || '';
+    if (outcome === 'FULL_WIN') { fullWins++; wins++; }
+    else if (outcome === 'TP1_WIN_TP2_FAILED' || outcome === 'TP1_WIN') { partialWins++; wins++; }
+    else if (outcome === 'DIR_WIN') { partialWins++; wins++; }
+    else if (outcome === 'SL_FAILED') { slFails++; }
+    else if (outcome === 'TIMEOUT_FAILED' || outcome === 'DIR_FAILED') { timeoutFails++; }
+    else if (res.direction_correct) { wins++; }
+  });
+
+  const winRate = verified > 0 ? (wins / verified * 100).toFixed(1) : "0.0";
+  document.getElementById("statWinRate").innerText = `${winRate}%`;
+  document.getElementById("statSubWin").innerText = `胜: ${wins} / 负: ${verified - wins} 笔`;
+  document.getElementById("statFullWin").innerText = `${fullWins} 笔`;
+  document.getElementById("statPartialWin").innerText = `${partialWins} 笔`;
+  document.getElementById("statSlFail").innerText = `${slFails} 笔`;
+  document.getElementById("statTimeoutFail").innerText = `${timeoutFails} 笔`;
+}
+
+function setTfFilter(tf, btn) {
+  currentTf = tf;
+  document.querySelectorAll('.filter-group:first-child .pill-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTable();
+}
+
+function setOutcomeFilter(outcome, btn) {
+  currentOutcome = outcome;
+  document.querySelectorAll('.filter-group:nth-child(2) .pill-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTable();
+}
+
+function toggleRow(predId) {
+  if (expandedRows.has(predId)) expandedRows.delete(predId);
+  else expandedRows.add(predId);
+  renderTable();
+}
+
+function renderTable() {
+  const search = (document.getElementById("searchInput").value || '').trim().toLowerCase();
+  const tbody = document.getElementById("historyTableBody");
+
+  let filtered = rawHistory.filter(h => {
+    if (currentTf !== 'ALL' && h.timeframe !== currentTf) return false;
+    const res = h.verified_result || {};
+    const outcome = res.outcome || (h.status === 'ACTIVE' ? 'ACTIVE' : '');
+    if (currentOutcome !== 'ALL') {
+      if (currentOutcome === 'FULL_WIN' && outcome !== 'FULL_WIN') return false;
+      if (currentOutcome === 'TP1_WIN_TP2_FAILED' && (outcome !== 'TP1_WIN_TP2_FAILED' && outcome !== 'TP1_WIN')) return false;
+      if (currentOutcome === 'SL_FAILED' && outcome !== 'SL_FAILED') return false;
+      if (currentOutcome === 'TIMEOUT_FAILED' && outcome !== 'TIMEOUT_FAILED') return false;
+    }
+    if (search) {
+      const txt = `${h.pred_id} ${h.direction} ${h.dir_label} ${h.base_price} ${res.exit_reason || ''}`.toLowerCase();
+      if (!txt.includes(search)) return false;
+    }
+    return true;
+  });
+
+  document.getElementById("recordCountText").innerText = `显示 ${filtered.length} / 共 ${rawHistory.length} 笔`;
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="12" class="muted" style="text-align:center;padding:28px">未找到符合筛选条件的历史预测记录</td></tr>`;
+    return;
+  }
+
+  let html = '';
+  filtered.forEach(p => {
+    const res = p.verified_result;
+    const isExp = expandedRows.has(p.pred_id);
+    const dir = p.direction || 'UP';
+    const dirCls = dir === 'UP' ? 'up' : (dir === 'DOWN' ? 'down' : 'neutral');
+
+    let badgeHtml = '<span class="badge pending">⏳ 作战中</span>';
+    let pnlHtml = '--';
+    let exitPx = '--';
+    let exitReason = p.stage_label || '正在追踪目标 1...';
+
+    if (res) {
+      exitPx = res.actual_close ? res.actual_close.toFixed(2) : '--';
+      const outcome = res.outcome || '';
+      if (outcome === 'FULL_WIN') badgeHtml = '<span class="badge success">🏆 双目标大胜</span>';
+      else if (outcome === 'TP1_WIN_TP2_FAILED') badgeHtml = '<span class="badge success">✅ 阶段胜单 (TP1胜/TP2败)</span>';
+      else if (outcome === 'TP1_WIN') badgeHtml = '<span class="badge success">🎯 目标1达成胜</span>';
+      else if (outcome === 'DIR_WIN') badgeHtml = '<span class="badge success">🟢 到期方向正确</span>';
+      else if (outcome === 'RANGE_NEUTRAL') badgeHtml = '<span class="badge warn">⚖️ 区间微幅震荡</span>';
+      else if (outcome === 'DEVIATION_STOP') badgeHtml = '<span class="badge warn">⚠️ 趋势偏离风控离场</span>';
+      else if (outcome === 'SL_FAILED') badgeHtml = '<span class="badge danger">🛑 触及失效线失败</span>';
+      else if (outcome === 'DIR_FAILED') badgeHtml = '<span class="badge danger">🛑 到期方向错误</span>';
+      else if (outcome === 'TIMEOUT_FAILED') badgeHtml = '<span class="badge warn">⏱️ 超时失效</span>';
+      else if (outcome === 'ARCHIVED_CLEANUP') badgeHtml = '<span class="badge muted">🧹 历史归档</span>';
+      else if (res.direction_correct) badgeHtml = '<span class="badge success">🟢 方向正确</span>';
+      else badgeHtml = '<span class="badge danger">🛑 预测失败</span>';
+
+      const pnl = res.pnl_pct || 0;
+      pnlHtml = `<span class="num ${pnl >= 0 ? 'up' : 'down'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`;
+      exitReason = res.exit_reason || '--';
+    }
+
+    html += `
+      <tr class="row-main ${isExp ? 'expanded' : ''}" onclick="toggleRow('${p.pred_id}')">
+        <td style="text-align:center;color:var(--muted)">${isExp ? '▼' : '▶'}</td>
+        <td class="num muted">${p.created_iso || '--'}</td>
+        <td><span class="badge" style="background:var(--panel3)">${p.timeframe}</span></td>
+        <td><span class="${dirCls}" style="font-weight:700">${p.dir_icon || ''} ${p.dir_label || ''}</span></td>
+        <td class="num">${p.confidence || 75}%</td>
+        <td class="num font-bold">${p.base_price ? p.base_price.toFixed(2) : '--'}</td>
+        <td class="num ${p.direction === 'UP' ? 'up' : 'down'}">${p.tp1 ? p.tp1.toFixed(2) : '--'} / ${p.tp2 ? p.tp2.toFixed(2) : '--'}</td>
+        <td class="num ${p.direction === 'UP' ? 'down' : 'up'}">${p.sl ? p.sl.toFixed(2) : '--'}</td>
+        <td class="num">${exitPx}</td>
+        <td>${pnlHtml}</td>
+        <td>${badgeHtml}</td>
+        <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis" title="${exitReason}">${exitReason}</td>
+      </tr>
+      <tr class="row-detail ${isExp ? 'show' : ''}">
+        <td colspan="12">
+          <div class="detail-box">
+            <!-- 1. 价格运作轨迹 -->
+            <div class="detail-sec">
+              <div class="detail-sec-title">📈 真实行情运作轨迹</div>
+              <div class="detail-kv"><span class="k">进场基准价:</span><span class="v">${p.base_price ? p.base_price.toFixed(2) : '--'} U</span></div>
+              <div class="detail-kv"><span class="k">最高曾达:</span><span class="v up">${res ? res.max_price.toFixed(2) : (p.highest_seen || '--')} U</span></div>
+              <div class="detail-kv"><span class="k">最低曾达:</span><span class="v down">${res ? res.min_price.toFixed(2) : (p.lowest_seen || '--')} U</span></div>
+              <div class="detail-kv"><span class="k">最终结算价:</span><span class="v font-bold">${exitPx} U</span></div>
+              <div class="detail-kv"><span class="k">单笔净盈亏:</span><span class="v">${pnlHtml}</span></div>
+            </div>
+
+            <!-- 2. 目标与止损执行详情 -->
+            <div class="detail-sec">
+              <div class="detail-sec-title">🎯 目标与防守执行明细</div>
+              <div class="detail-kv"><span class="k">目标位 1 (TP1):</span><span class="v ${p.direction === 'UP' ? 'up' : 'down'}">${p.tp1 ? p.tp1.toFixed(2) : '--'} (${(res && res.tp1_hit) ? '✅ 达成' : (p.tp1_status === 'REACHED' ? '✅ 已达成' : '❌ 未达')})</span></div>
+              <div class="detail-kv"><span class="k">目标位 2 (TP2):</span><span class="v ${p.direction === 'UP' ? 'up' : 'down'}">${p.tp2 ? p.tp2.toFixed(2) : '--'} (${(res && res.tp2_hit) ? '✅ 双达标' : (p.tp2_status === 'REACHED' ? '✅ 达成' : '❌ 未达成')})</span></div>
+              <div class="detail-kv"><span class="k">失效止损 (SL):</span><span class="v ${p.direction === 'UP' ? 'down' : 'up'}">${p.sl ? p.sl.toFixed(2) : '--'} (${(res && res.sl_hit) ? '🛑 触线止损' : '安全未碰'})</span></div>
+              <div class="detail-kv"><span class="k">超时保护时限:</span><span class="v muted">${p.timeout_candles || 24} 根 K 线</span></div>
+              <div class="detail-kv"><span class="k">终结原因:</span><span class="v" style="font-size:10px">${exitReason}</span></div>
+            </div>
+
+            <!-- 3. 二次推算记录 (若达成TP1) -->
+            <div class="detail-sec">
+              <div class="detail-sec-title">⚡ TP1 达成时二次推算</div>
+              <div class="detail-kv"><span class="k">二次推算状态:</span><span class="v">${p.secondary_eval ? '已执行' : '未触发'}</span></div>
+              <div class="detail-kv"><span class="k">二次推算方向:</span><span class="v">${p.secondary_eval ? p.secondary_eval.continuation_direction : '--'}</span></div>
+              <div class="detail-kv"><span class="k">动能复合得分:</span><span class="v">${p.secondary_eval ? p.secondary_eval.composite_score.toFixed(2) : '--'}</span></div>
+              <div class="detail-kv"><span class="k">决策结果:</span><span class="v ${p.secondary_eval && p.secondary_eval.should_continue ? 'up' : 'muted'}">${p.secondary_eval ? (p.secondary_eval.should_continue ? '动能延续冲刺TP2' : '动能减弱获利了结') : '--'}</span></div>
+              <div class="detail-kv"><span class="k">推算时间:</span><span class="v muted">${p.secondary_eval ? p.secondary_eval.evaluated_at.slice(11) : '--'}</span></div>
+            </div>
+
+            <!-- 4. 预测入场时多因子属性 -->
+            <div class="detail-sec">
+              <div class="detail-sec-title">🏷️ 预测入场多因子特征</div>
+              <div class="detail-kv"><span class="k">预测单号:</span><span class="v muted" style="font-size:9.5px">${p.pred_id}</span></div>
+              <div class="detail-kv"><span class="k">置信度评分:</span><span class="v">${p.confidence || 75}%</span></div>
+              <div class="detail-kv"><span class="k">波动率 ATR:</span><span class="v">${p.atr ? p.atr.toFixed(2) : '--'}</span></div>
+              <div class="detail-kv"><span class="k">归因标签:</span><span class="v">${(p.attribution_tags || []).join(' · ')}</span></div>
+              <div style="font-size:10px;color:var(--muted);margin-top:4px;line-height:1.4">${p.attribution_detail || '多因子均衡'}</div>
+            </div>
+          </div>
+        </td>
+      </tr>
+    `;
+  });
+
+  tbody.innerHTML = html;
+}
+
+function exportJSON() {
+  const blob = new Blob([JSON.stringify(rawHistory, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `eth_predictions_history_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function openResetModal() {
+  document.getElementById("resetModal").classList.add("open");
+}
+
+function closeResetModal() {
+  document.getElementById("resetModal").classList.remove("open");
+}
+
+async function confirmReset() {
+  try {
+    const r = await fetch('/api/prediction/reset', { method: 'POST' });
+    const data = await r.json();
+    alert(data.message || "重置成功！");
+    closeResetModal();
+    loadHistoryData();
+  } catch(e) {
+    alert("重置失败: " + e.message);
+  }
+}
+
+// 页面加载启动
+window.addEventListener("DOMContentLoaded", () => {
+  loadHistoryData();
+  setInterval(loadHistoryData, 8000); // 8秒自动轮询同步
+});
+</script>
+</body>
+</html>
