@@ -21,6 +21,7 @@ from eth_predictor.indicators import (
 )
 from eth_predictor.regime import detect_market_regime
 from eth_predictor.scenarios import generate_scenario_tree
+from eth_predictor.feature_cross import FeatureCrossEngine
 
 TZ_BJT = timezone(timedelta(hours=8))
 
@@ -35,6 +36,7 @@ DEFAULT_TIMEFRAME_WEIGHTS = {
         "w_tech": 0.15,        # RSI 超买超卖、布林带挤压与防追涨杀跌
         "w_macro": 0.05,       # 突发快讯异动冲击
         "w_hier": 0.15,        # 大中周期层级共振 (强化 1H/1D 顺势引导，杜绝逆向打架)
+        "w_cross": 0.12,       # 【阶段二新增】LightGBM 微观特征交互项权重 (限定在特征层)
         "neutral_thresh": 0.16,# 判定中性震荡门槛 (窄幅震荡严禁发假多空，坚决保持观望)
         "atr_tp1_mult": 0.85,  # 目标 1 ATR 乘数 (0.85 ATR，约 2.8~4.2 USDT，契合 5 分钟尺度)
         "atr_tp2_mult": 1.65,  # 目标 2 ATR 乘数 (1.65 ATR，约 5.5~8.5 USDT)
@@ -75,6 +77,7 @@ class ETHPredictor:
     def __init__(self, weights=None):
         self.weights = copy.deepcopy(weights or DEFAULT_TIMEFRAME_WEIGHTS)
         self.top_ls_history = []  # 滚动保存近端 top_ls_ratio 样本以计算自适应分位数中位数 (改动3)
+        self.cross_engine = FeatureCrossEngine()  # 阶段二：LightGBM 特征交换层引擎 (无缝双模推断)
 
     def get_dynamic_ls_baseline(self, current_top_ls):
         """自适应大户多空比动态基准 (改动3: 替换写死的 1.30)"""
@@ -471,6 +474,29 @@ class ETHPredictor:
         # 动态自适应耗竭抑制与吸收加权 (改动3: 动态替换硬编码)
         exhaustion_penalty = exhaustion_5m["penalty"]
 
+        # 阶段二：LightGBM 微观特征交互层 (仅作用于特征交叉层，严禁进入决策层)
+        cross_input = {
+            "oi_delta_5m": oi_delta_5m,
+            "oi_delta_1h": oi_delta_1h,
+            "cvd_5m": cvd_5m,
+            "liq_gravity": liq_gravity,
+            "vwap_daily": vwap_daily,
+            "pos_info": {"top_ls_ratio": top_ls_ratio},
+            "dyn_ls_baseline": dyn_ls_baseline,
+            "taker_ratio_5m": taker_ratio_5m,
+            "funding_rate": funding_rate,
+            "vol_regime_5m": vol_regime_5m,
+            "lower_wick_ratio": lower_wick_ratio,
+            "upper_wick_ratio": upper_wick_ratio,
+            "bb_5m": bb_5m,
+            "btc_lead": btc_lead,
+        }
+        cross_res = self.cross_engine.evaluate(cross_input)
+        s_cross_mom = cross_res.get("s_cross_momentum", 0.0)
+        s_cross_abs = cross_res.get("s_cross_absorption", 0.0)
+        gamma_elasticity = safe_float(cross_res.get("gamma_elasticity", 1.0))
+        cross_regime = cross_res.get("cross_regime_tag", "BALANCED")
+
         # 1H 战略方向基准裁决 (【改动 1】核心战略锚定)
         strategic_1h = pred_1h.get("direction", "NEUTRAL")
         score_1h = safe_float(pred_1h.get("composite_score", 0.0))
@@ -502,15 +528,15 @@ class ETHPredictor:
             is_near_poc = abs(price - poc_5m) <= (atr_5m * 0.8)
             is_near_val = price <= (val_5m + atr_5m * 0.8)
             is_near_vwap = vwap_ext_5m["current_z"] <= 0.3
-            is_wick_absorption = (lower_wick_ratio >= 0.30 and pct_b_5m <= 0.35) or (exhaustion_penalty > 0.2)
+            is_wick_absorption = (lower_wick_ratio >= 0.30 and pct_b_5m <= 0.35) or (exhaustion_penalty > 0.2) or (s_cross_abs >= 0.35)
 
             is_pullback_ready = (is_near_poc or is_near_val or is_near_vwap or is_wick_absorption)
-            is_flow_healthy = (cvd_5m["score"] >= -0.35) and (s_oi_5m >= -0.35)
+            is_flow_healthy = (cvd_5m["score"] >= -0.35) and (s_oi_5m >= -0.35) and (s_cross_mom >= -0.45)
 
             if is_pullback_ready and is_flow_healthy:
                 custom_5m_dir = "UP"
                 custom_5m_label = "🎯 1H顺势·5M回踩吸筹接多"
-                composite_5m = max(0.24, round(score_1h * 0.60 + 0.22, 3))
+                composite_5m = max(0.24, round(score_1h * 0.60 + 0.22 + 0.12 * s_cross_mom, 3))
                 is_5m_at_floor = True
             else:
                 custom_5m_dir = "NEUTRAL"
@@ -523,15 +549,15 @@ class ETHPredictor:
             is_near_poc = abs(price - poc_5m) <= (atr_5m * 0.8)
             is_near_vah = price >= (vah_5m - atr_5m * 0.8)
             is_near_vwap = vwap_ext_5m["current_z"] >= -0.3
-            is_wick_exhaustion = (upper_wick_ratio >= 0.30 and pct_b_5m >= 0.65) or (exhaustion_penalty < -0.2)
+            is_wick_exhaustion = (upper_wick_ratio >= 0.30 and pct_b_5m >= 0.65) or (exhaustion_penalty < -0.2) or (s_cross_abs <= -0.35)
 
             is_rally_ready = (is_near_poc or is_near_vah or is_near_vwap or is_wick_exhaustion)
-            is_flow_healthy = (cvd_5m["score"] <= 0.35) and (s_oi_5m <= 0.35)
+            is_flow_healthy = (cvd_5m["score"] <= 0.35) and (s_oi_5m <= 0.35) and (s_cross_mom <= 0.45)
 
             if is_rally_ready and is_flow_healthy:
                 custom_5m_dir = "DOWN"
                 custom_5m_label = "🎯 1H顺势·5M反弹阻力接空"
-                composite_5m = min(-0.24, round(score_1h * 0.60 - 0.22, 3))
+                composite_5m = min(-0.24, round(score_1h * 0.60 - 0.22 + 0.12 * s_cross_mom, 3))
                 is_5m_at_ceiling = True
             else:
                 custom_5m_dir = "NEUTRAL"
@@ -541,15 +567,15 @@ class ETHPredictor:
             # -----------------------------------------------------------------
             # 1H 震荡观望 (NEUTRAL)：5M 严格执行拍卖市场箱体边缘高抛低吸
             # -----------------------------------------------------------------
-            if (price <= val_5m + 0.8) and (lower_wick_ratio >= 0.30 or exhaustion_penalty > 0.2):
+            if (price <= val_5m + 0.8) and (lower_wick_ratio >= 0.30 or exhaustion_penalty > 0.2 or s_cross_abs >= 0.35):
                 custom_5m_dir = "UP"
                 custom_5m_label = "1H震荡·5M箱体底部接多"
-                composite_5m = 0.28
+                composite_5m = round(0.28 + 0.10 * s_cross_mom, 3)
                 is_5m_at_floor = True
-            elif (price >= vah_5m - 0.8) and (upper_wick_ratio >= 0.30 or exhaustion_penalty < -0.2):
+            elif (price >= vah_5m - 0.8) and (upper_wick_ratio >= 0.30 or exhaustion_penalty < -0.2 or s_cross_abs <= -0.35):
                 custom_5m_dir = "DOWN"
                 custom_5m_label = "1H震荡·5M箱体顶部接空"
-                composite_5m = -0.28
+                composite_5m = round(-0.28 + 0.10 * s_cross_mom, 3)
                 is_5m_at_ceiling = True
             else:
                 custom_5m_dir = "NEUTRAL"
@@ -557,7 +583,7 @@ class ETHPredictor:
                 composite_5m = 0.0
 
         hier_bias = composite_1h * 0.70 + composite_1d * 0.30
-        atr_5m_scaled = atr_5m * vol_mult * vol_target_mult_5m
+        atr_5m_scaled = atr_5m * vol_mult * vol_target_mult_5m * gamma_elasticity
 
         pred_5m = self._build_prediction_record(
             pred_id=f"pred_5m_{now_ts}_{uuid.uuid4().hex[:6]}",
@@ -584,9 +610,11 @@ class ETHPredictor:
             is_ceiling_short=is_5m_at_ceiling,
             is_floor_long=is_5m_at_floor,
             custom_dir_label=custom_5m_label,
-            custom_direction=custom_5m_dir
+            custom_direction=custom_5m_dir,
+            feature_cross=cross_res
         )
         results["5m"] = pred_5m
+        results["feature_cross"] = cross_res
 
         return results
 
@@ -596,7 +624,8 @@ class ETHPredictor:
                                  market_regime=None, bb_bands=None, pivot_levels=None,
                                  btc_lead_lag=None, realtime_liquidations=None, volume_profile=None,
                                  is_ceiling_short=False, is_floor_long=False,
-                                 custom_dir_label=None, custom_direction=None):
+                                 custom_dir_label=None, custom_direction=None,
+                                 feature_cross=None):
         """生成单周期实时预测记录，含方向、预期目标带、结构失效线、置信度、驱动归因及多情景概率树"""
         thresh = weights.get("neutral_thresh", 0.08)
         k_tp1 = weights.get("atr_tp1_mult", 0.45)
@@ -834,6 +863,22 @@ class ETHPredictor:
                     attribution_tags.append(f"多头踩踏强平({rt_total:.0f}E)")
                     attribution_detail.append(f"监测到多头连续强平踩踏，累计爆仓 {rt_total:.0f} ETH")
 
+        # LightGBM 微观特征交互层定性归因 (限定在特征层输出，辅助归因分析)
+        if feature_cross:
+            cg_tag = feature_cross.get("cross_regime_tag", "BALANCED")
+            if cg_tag and cg_tag != "BALANCED":
+                cg_map = {
+                    "SQUEEZE_LONG": "GBM动量多头共振",
+                    "SQUEEZE_SHORT": "GBM动量空头共振",
+                    "ABSORPTION_LONG": "GBM底部暗流吸收",
+                    "ABSORPTION_SHORT": "GBM顶部暗流派发",
+                    "VOLATILITY_EXPANSION": "GBM波动非线性扩张"
+                }
+                attribution_tags.append(cg_map.get(cg_tag, f"GBM:[{cg_tag}]"))
+            cg_summary = feature_cross.get("interaction_summary")
+            if cg_summary:
+                attribution_detail.append(cg_summary)
+
         # 生成多情景走势概率树 (Scenario Probability Tree: 主路径 / 洗盘反抽 / 破位失效)
         scenario_tree = generate_scenario_tree(
             tf=tf,
@@ -881,7 +926,8 @@ class ETHPredictor:
             "pos_info": pos_info,
             "liq_gravity": liq_gravity,
             "vwap_daily": vwap_daily,
-            "volume_profile": vp
+            "volume_profile": vp,
+            "feature_cross": feature_cross
         }
 
     def build_forced_prediction(self, tf, direction, price, market_snapshot):

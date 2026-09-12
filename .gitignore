@@ -23,7 +23,8 @@ coinglass_manual.json
 .env.local
 
 # Runtime local data & captures
-data/
+data/*
+!data/models/
 test_data/
 *.sqlite3
 
