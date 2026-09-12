@@ -38,8 +38,11 @@ DEFAULT_TIMEFRAME_WEIGHTS = {
         "w_hier": 0.15,        # 大中周期层级共振 (强化 1H/1D 顺势引导，杜绝逆向打架)
         "w_cross": 0.12,       # 【阶段二新增】LightGBM 微观特征交互项权重 (限定在特征层)
         "neutral_thresh": 0.16,# 判定中性震荡门槛 (窄幅震荡严禁发假多空，坚决保持观望)
-        "atr_tp1_mult": 0.85,  # 目标 1 ATR 乘数 (0.85 ATR，约 2.8~4.2 USDT，契合 5 分钟尺度)
-        "atr_tp2_mult": 1.65,  # 目标 2 ATR 乘数 (1.65 ATR，约 5.5~8.5 USDT)
+        "min_directional_space": 8.0,  # 5M 最小期望空间底线 (不足 8~10 USDT 保持观望，杜绝鸡肋刷单)
+        "min_tp1_dist": 6.0,   # 5M TP1 最低目标距离 (确保覆盖双向手续费与微观滑点)
+        "min_tp2_dist": 10.0,  # 5M TP2 冲刺目标空间 (满足完整 10 点波段空间)
+        "atr_tp1_mult": 1.10,  # 目标 1 ATR 乘数 (约 4.5~6.5 USDT)
+        "atr_tp2_mult": 2.20,  # 目标 2 ATR 乘数 (约 9.0~14.0 USDT)
         "atr_sl_mult": 1.45,   # 结构失效边界乘数 (1.45 ATR，保留微观抗扰空间)
         "min_confidence": 65.0,# 基础置信度起步
     },
@@ -52,8 +55,11 @@ DEFAULT_TIMEFRAME_WEIGHTS = {
         "w_macro": 0.05,       # 宏观资金面
         "w_hier": 0.12,        # 1d 宏观趋势层级引导
         "neutral_thresh": 0.14,# 1H 判定中性震荡门槛 (低于此阈值坚决保持观望)
-        "atr_tp1_mult": 0.80,  # 目标 1 ATR 乘数 (0.80 ATR，约 12~16 USDT，贴合日内波段现实)
-        "atr_tp2_mult": 1.60,  # 目标 2 ATR 乘数 (1.60 ATR，约 24~32 USDT)
+        "min_directional_space": 30.0, # 1H 最小期望空间底线 (不足 30 USDT 保持观望，不发多空)
+        "min_tp1_dist": 18.0,  # 1H TP1 最低目标距离
+        "min_tp2_dist": 30.0,  # 1H TP2 冲刺目标空间 (满足完整 30 点日内波段)
+        "atr_tp1_mult": 1.10,  # 目标 1 ATR 乘数 (约 16~22 USDT，贴合日内波段现实)
+        "atr_tp2_mult": 2.00,  # 目标 2 ATR 乘数 (约 30~42 USDT)
         "atr_sl_mult": 1.50,   # 结构失效边界乘数 (1.50 ATR)
         "min_confidence": 68.0,
     },
@@ -65,8 +71,11 @@ DEFAULT_TIMEFRAME_WEIGHTS = {
         "w_tech": 0.10,        # 大周期日线结构支撑阻力
         "w_macro": 0.10,       # 宏观流动性与突发事件
         "neutral_thresh": 0.15,# 1D 判定中性震荡门槛 (低于此阈值坚决保持观望)
-        "atr_tp1_mult": 0.65,  # 目标 1 ATR 乘数 (0.65 ATR，约 35~48 USDT，匹配当前日内振幅)
-        "atr_tp2_mult": 1.30,  # 目标 2 ATR 乘数 (1.30 ATR，约 70~95 USDT)
+        "min_directional_space": 60.0, # 1D 最小期望空间底线 (不足 50~70 USDT 保持观望，不发大势)
+        "min_tp1_dist": 35.0,  # 1D TP1 最低目标距离
+        "min_tp2_dist": 60.0,  # 1D TP2 冲刺目标空间 (满足 60 点宏观大波段)
+        "atr_tp1_mult": 0.75,  # 目标 1 ATR 乘数 (约 45~65 USDT，匹配当前日内振幅)
+        "atr_tp2_mult": 1.45,  # 目标 2 ATR 乘数 (约 80~120 USDT)
         "atr_sl_mult": 1.60,   # 结构失效边界乘数 (1.60 ATR，合理止损防守空间)
         "min_confidence": 70.0,
     }
@@ -532,15 +541,17 @@ class ETHPredictor:
 
             is_pullback_ready = (is_near_poc or is_near_val or is_near_vwap or is_wick_absorption)
             is_flow_healthy = (cvd_5m["score"] >= -0.35) and (s_oi_5m >= -0.35) and (s_cross_mom >= -0.45)
+            # 空间核验：向上至阻力区需至少具备 6.5~8 点可用波段空间，严禁顶在天花板上接多
+            has_upward_space = (vah_5m - price >= 6.5) or (price >= rhigh_5m - 0.5)
 
-            if is_pullback_ready and is_flow_healthy:
+            if is_pullback_ready and is_flow_healthy and has_upward_space:
                 custom_5m_dir = "UP"
                 custom_5m_label = "🎯 1H顺势·5M回踩吸筹接多"
                 composite_5m = max(0.24, round(score_1h * 0.60 + 0.22 + 0.12 * s_cross_mom, 3))
                 is_5m_at_floor = True
             else:
                 custom_5m_dir = "NEUTRAL"
-                custom_5m_label = "⏳ 1H顺势看涨·5M脉冲观望(等待回踩)"
+                custom_5m_label = "⏳ 1H顺势看涨·5M空间受阻(接近阻力)" if not has_upward_space else "⏳ 1H顺势看涨·5M脉冲观望(等待回踩)"
                 composite_5m = 0.05
         elif strategic_1h == "DOWN":
             # -----------------------------------------------------------------
@@ -553,15 +564,17 @@ class ETHPredictor:
 
             is_rally_ready = (is_near_poc or is_near_vah or is_near_vwap or is_wick_exhaustion)
             is_flow_healthy = (cvd_5m["score"] <= 0.35) and (s_oi_5m <= 0.35) and (s_cross_mom <= 0.45)
+            # 空间核验：向下至支撑区需至少具备 6.5~8 点可用波段空间，严禁砸在地板上接空
+            has_downward_space = (price - val_5m >= 6.5) or (price <= rlow_5m + 0.5)
 
-            if is_rally_ready and is_flow_healthy:
+            if is_rally_ready and is_flow_healthy and has_downward_space:
                 custom_5m_dir = "DOWN"
                 custom_5m_label = "🎯 1H顺势·5M反弹阻力接空"
                 composite_5m = min(-0.24, round(score_1h * 0.60 - 0.22 + 0.12 * s_cross_mom, 3))
                 is_5m_at_ceiling = True
             else:
                 custom_5m_dir = "NEUTRAL"
-                custom_5m_label = "⏳ 1H顺势看跌·5M下探观望(等待反弹)"
+                custom_5m_label = "⏳ 1H顺势看跌·5M空间受阻(接近支撑)" if not has_downward_space else "⏳ 1H顺势看跌·5M下探观望(等待反弹)"
                 composite_5m = -0.05
         else:
             # -----------------------------------------------------------------
@@ -703,10 +716,14 @@ class ETHPredictor:
             else:
                 dir_label = "宏观偏多" if direction == "UP" else "宏观偏空"
 
-        # 动态目标位置与结构失效线计算 (结合筹码分布价值区 POC/VAH/VAL、ATR 与清算池磁吸点)
-        min_tp1_dist = max(atr * 0.40, 2.2) if tf == "5m" else (max(atr * 0.35, 5.0) if tf == "1h" else max(atr * 0.35, 18.0))
-        min_tp2_step = max(round(atr * 0.35, 2), 1.8 if tf == "5m" else (3.5 if tf == "1h" else 15.0))
-        min_sl_dist = max(round(atr * 0.50, 2), 2.2 if tf == "5m" else (5.0 if tf == "1h" else 18.0))
+        # 动态目标位置与结构失效线计算 (结合用户要求：5M>=8~10点, 1H>=30点, 1D>=60点)
+        min_space_req = weights.get("min_directional_space", 8.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
+        cfg_min_tp1 = weights.get("min_tp1_dist", 6.0 if tf == "5m" else (18.0 if tf == "1h" else 35.0))
+        cfg_min_tp2 = weights.get("min_tp2_dist", 10.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
+
+        min_tp1_dist = max(atr * k_tp1 * 0.70, cfg_min_tp1)
+        min_tp2_step = max(round(atr * 0.40, 2), 3.5 if tf == "5m" else (10.0 if tf == "1h" else 20.0))
+        min_sl_dist = max(round(atr * 0.50, 2), 3.0 if tf == "5m" else (10.0 if tf == "1h" else 22.0))
 
         vp = volume_profile or {}
         poc = safe_float(vp.get("poc"))
@@ -742,6 +759,7 @@ class ETHPredictor:
                     tp2 = round(tp2_atr, 2)
             tp2 = min(tp2, round(price + atr * (k_tp2 * 1.4), 2))
             tp2 = max(tp2, round(tp1 + min_tp2_step, 2))
+            tp2 = max(tp2, round(price + cfg_min_tp2, 2))
 
             # 结构失效线：底部接多紧贴支撑下沿防守，形成非对称高盈亏比
             support_floor = min(val, rlow) if (val > 0 and rlow > 0) else (price - min_sl_dist)
@@ -782,6 +800,7 @@ class ETHPredictor:
                     tp2 = round(tp2_atr, 2)
             tp2 = max(tp2, round(price - atr * (k_tp2 * 1.4), 2))
             tp2 = min(tp2, round(tp1 - min_tp2_step, 2))
+            tp2 = min(tp2, round(price - cfg_min_tp2, 2))
 
             # 结构失效线：顶部接空紧贴阻力上沿防守，形成非对称高盈亏比
             resist_ceiling = max(vah, rhigh) if (vah > 0 and rhigh > 0) else (price + min_sl_dist)
@@ -800,6 +819,21 @@ class ETHPredictor:
             sl = 0.0
             target_range = "--"
             expected_change_pct = 0.0
+
+        # 空间门槛硬核核验 (5M>=8~10点, 1H>=30点, 1D>=60点)：
+        # 若潜在波段空间达不到空间门槛，坚决判定为 NEUTRAL 观望，杜绝低盈亏比鸡肋交易！
+        total_space = abs(tp2 - price) if direction in ("UP", "DOWN") else 0.0
+        if direction in ("UP", "DOWN") and total_space < min_space_req:
+            direction = "NEUTRAL"
+            dir_icon = "⏸️"
+            dir_label = f"空间受限观望 (<{min_space_req:.0f}点)"
+            confidence = base_conf
+            tp1 = 0.0
+            tp2 = 0.0
+            sl = 0.0
+            target_range = "--"
+            expected_change_pct = 0.0
+            attribution_tags.append(f"空间受限(<{min_space_req:.0f}点)")
 
         # 核心驱动因子归因标签与详细诊断
         attribution_detail = []
