@@ -561,14 +561,48 @@ class BinanceFuturesFeed:
                 self.error = f"行情拉取失败: {e}"
                 raise
 
-    def get_btc_lead_lag_stats(self):
-        """计算 BTC 领先滞后先导溢出指标 (BTC Lead-Lag Alpha)"""
-        now = time.time()
+    def get_btc_lead_lag_stats(self, as_of_ms=None):
+        """计算 BTC 领先滞后先导溢出指标 (BTC Lead-Lag Alpha)
+
+        AUDIT_FIX_ASOF_001:
+          - Filter closed 5m klines as-of T
+          - Historical replay: use T-time last closed closes (forbid wall-clock spot)
+          - Live: may use live spot vs last closed bar
+        """
+        t_ms = int(as_of_ms) if as_of_ms is not None else int(time.time() * 1000)
+        wall_ms = int(time.time() * 1000)
+        is_historical = as_of_ms is not None and abs(t_ms - wall_ms) > 5000
+
         with self.data_lock:
-            btc_px = self.btc_price
-            eth_px = self.price
-            btc_kl = list(self.btc_klines_5m)
-            eth_kl = list(self.klines)
+            live_btc = self.btc_price
+            live_eth = self.price
+            btc_kl_raw = list(self.btc_klines_5m)
+            eth_kl_raw = list(self.klines)
+
+        if filter_closed_klines is not None:
+            btc_kl = filter_closed_klines(btc_kl_raw, as_of_ms=t_ms, interval="5m")
+            eth_kl = filter_closed_klines(eth_kl_raw, as_of_ms=t_ms, interval="5m")
+        else:
+            # Fallback: keep bars whose close_time (idx 6) or open+5m-1 <= t_ms
+            def _closed(raw):
+                out = []
+                for k in raw:
+                    try:
+                        ct = int(float(k[6])) if len(k) > 6 and k[6] is not None else int(float(k[0])) + 299999
+                        if ct <= t_ms:
+                            out.append(k)
+                    except Exception:
+                        continue
+                return out
+            btc_kl = _closed(btc_kl_raw)
+            eth_kl = _closed(eth_kl_raw)
+
+        if is_historical:
+            btc_px = float(btc_kl[-1][4]) if btc_kl else 0.0
+            eth_px = float(eth_kl[-1][4]) if eth_kl else 0.0
+        else:
+            btc_px = float(live_btc) if live_btc else (float(btc_kl[-1][4]) if btc_kl else 0.0)
+            eth_px = float(live_eth) if live_eth else (float(eth_kl[-1][4]) if eth_kl else 0.0)
 
         if not btc_px or not eth_px:
             return {
@@ -579,30 +613,44 @@ class BinanceFuturesFeed:
                 "divergence_pct": 0.0,
                 "lead_signal": "SYNCHRONIZED",
                 "spillover_score": 0.0,
-                "status_text": "BTC 先导数据采集中"
+                "status_text": "BTC 先导数据采集中",
+                "as_of_ms": t_ms,
             }
 
         # 计算 BTC 5m 涨跌幅
         btc_change_5m = 0.0
-        if len(btc_kl) >= 2:
-            prev_btc = float(btc_kl[-2][4])
-            if prev_btc > 0:
-                btc_change_5m = round(((btc_px - prev_btc) / prev_btc) * 100.0, 3)
-        elif btc_kl:
-            open_btc = float(btc_kl[-1][1])
-            if open_btc > 0:
-                btc_change_5m = round(((btc_px - open_btc) / open_btc) * 100.0, 3)
+        if is_historical:
+            if len(btc_kl) >= 2:
+                prev_btc = float(btc_kl[-2][4])
+                if prev_btc > 0:
+                    btc_change_5m = round(((btc_px - prev_btc) / prev_btc) * 100.0, 3)
+            elif btc_kl:
+                open_btc = float(btc_kl[-1][1])
+                if open_btc > 0:
+                    btc_change_5m = round(((btc_px - open_btc) / open_btc) * 100.0, 3)
+        else:
+            # Live: spot vs last closed bar
+            if btc_kl:
+                prev_btc = float(btc_kl[-1][4])
+                if prev_btc > 0:
+                    btc_change_5m = round(((btc_px - prev_btc) / prev_btc) * 100.0, 3)
 
         # 计算 ETH 5m 涨跌幅
         eth_change_5m = 0.0
-        if len(eth_kl) >= 2:
-            prev_eth = float(eth_kl[-2][4])
-            if prev_eth > 0:
-                eth_change_5m = round(((eth_px - prev_eth) / prev_eth) * 100.0, 3)
-        elif eth_kl:
-            open_eth = float(eth_kl[-1][1])
-            if open_eth > 0:
-                eth_change_5m = round(((eth_px - open_eth) / open_eth) * 100.0, 3)
+        if is_historical:
+            if len(eth_kl) >= 2:
+                prev_eth = float(eth_kl[-2][4])
+                if prev_eth > 0:
+                    eth_change_5m = round(((eth_px - prev_eth) / prev_eth) * 100.0, 3)
+            elif eth_kl:
+                open_eth = float(eth_kl[-1][1])
+                if open_eth > 0:
+                    eth_change_5m = round(((eth_px - open_eth) / open_eth) * 100.0, 3)
+        else:
+            if eth_kl:
+                prev_eth = float(eth_kl[-1][4])
+                if prev_eth > 0:
+                    eth_change_5m = round(((eth_px - prev_eth) / prev_eth) * 100.0, 3)
 
         # 领先滞后剪刀差 (BTC 涨幅 - ETH 涨幅)
         div = round(btc_change_5m - eth_change_5m, 3)
@@ -634,7 +682,8 @@ class BinanceFuturesFeed:
             "divergence_pct": div,
             "lead_signal": signal,
             "spillover_score": spillover_score,
-            "status_text": text
+            "status_text": text,
+            "as_of_ms": t_ms,
         }
 
     def poll_volume_and_oi(self, force=False):
@@ -791,7 +840,14 @@ class BinanceFuturesFeed:
         sum_sq = sum(v * ((tp - vwap) ** 2) for tp, v in kl_data)
         sigma = math.sqrt(sum_sq / cum_vol)
         sigma_round = round(sigma, 2)
-        cur_px = float(self.price) if self.price else float(today_ks[-1][4])
+        # AUDIT_FIX_ASOF_001: historical as_of must use as-of / last closed close — never wall-clock self.price
+        last_close = float(today_ks[-1][4])
+        wall_ms = int(time.time() * 1000)
+        is_historical = as_of_ms is not None and abs(t_ms - wall_ms) > 5000
+        if is_historical:
+            cur_px = last_close
+        else:
+            cur_px = float(self.price) if self.price else last_close
         z_score = round((cur_px - vwap) / sigma, 3) if sigma > 0 else 0.0
         slope = round(vwap_series[-1] - vwap_series[-6], 2) if len(vwap_series) >= 6 else 0.0
 

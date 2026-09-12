@@ -136,13 +136,43 @@ class PredictorService:
 
         liq_data = self.load_liq_data(as_of_ms=t_ms)
         rt_liq = getattr(feed, "get_realtime_liquidation_stats", lambda: {})()
+        wall_ms = int(time.time() * 1000)
+        is_historical = as_of_ms is not None and abs(t_ms - wall_ms) > 5000
         # Realtime forceOrder stream: filter events with time <= as_of
-        if isinstance(rt_liq, dict) and as_of_ms is not None:
-            # stats already windowed to recent; for historical as_of, zero if not live
-            if abs(t_ms - int(time.time() * 1000)) > 5000:
-                rt_liq = {}
+        if isinstance(rt_liq, dict) and is_historical:
+            rt_liq = {}
 
-        btc_lead = getattr(feed, "get_btc_lead_lag_stats", lambda: {})()
+        # AUDIT_FIX_ASOF_001: BTC lead-lag must honor as_of_ms (closed bars / T-time prices)
+        btc_fn = getattr(feed, "get_btc_lead_lag_stats", None)
+        if callable(btc_fn):
+            try:
+                btc_lead = btc_fn(as_of_ms=t_ms)
+            except TypeError:
+                btc_lead = btc_fn()
+        else:
+            btc_lead = {}
+
+        # Historical replay: forbid wall-clock spot — use last closed 5m close as T-time price
+        if is_historical and kl_5m:
+            price = safe_float(kl_5m[-1][4], price or 0.0)
+
+        # AUDIT_FIX_ASOF_001: macro RSS must be as-of T (filter published_ts<=T or disable)
+        if is_historical:
+            try:
+                macro_events = self.macro_manager.evaluate_composite_events(as_of_ms=t_ms)
+            except TypeError:
+                macro_events = {
+                    "composite_event_score": 0.0,
+                    "volatility_multiplier": 1.0,
+                    "macro_disabled": True,
+                    "macro_disabled_reason": "macro as-of unsupported; disabled for replay",
+                    "as_of_ms": t_ms,
+                    "recent_news": [],
+                    "event_tags": [],
+                    "summary": "macro disabled for historical as_of",
+                }
+        else:
+            macro_events = self.macro_events
 
         return {
             "price": price,
@@ -164,7 +194,7 @@ class PredictorService:
             "funding_rate": micro.get("funding_rate", 0.0001),
             "vwap_daily": vwap_daily,
             "liq_raw_data": liq_data,
-            "macro_events": self.macro_events,
+            "macro_events": macro_events,
             "realtime_liquidations": rt_liq,
             "btc_lead_lag": btc_lead,
         }

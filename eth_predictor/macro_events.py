@@ -23,6 +23,7 @@ import copy
 import json
 import re
 import time
+from email.utils import parsedate_to_datetime
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -110,12 +111,14 @@ class MacroEventManager:
 
                         # 情感与分类评级
                         sentiment, category, tags = self._classify_news(title, desc)
+                        published_ts_ms = self._parse_pub_date_ms(pub_date)
                         if title:
                             all_news.append({
                                 "source": source_name,
                                 "title": title.strip(),
                                 "link": link.strip(),
                                 "pub_date": pub_date.strip(),
+                                "published_ts_ms": published_ts_ms,
                                 "sentiment_score": sentiment,
                                 "sentiment_label": "利多" if sentiment > 0.15 else ("利空" if sentiment < -0.15 else "中性"),
                                 "category": category,
@@ -170,6 +173,60 @@ class MacroEventManager:
 
         score = max(-1.0, min(1.0, round(score, 2)))
         return score, category, tags[:3]
+
+    def _parse_pub_date_ms(self, pub_date):
+        """Parse RSS pubDate to epoch ms; return None if unavailable."""
+        if not pub_date:
+            return None
+        try:
+            dt = parsedate_to_datetime(pub_date.strip())
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except Exception:
+            return None
+
+    def _neutral_disabled_macro(self, as_of_ms, reason):
+        """Neutral macro state for historical replay when RSS cannot be aligned to T."""
+        return {
+            "updated_at": datetime.now(TZ_BJT).strftime("%Y-%m-%d %H:%M:%S"),
+            "composite_event_score": 0.0,
+            "volatility_multiplier": 1.0,
+            "fed": {
+                "stance_label": "宏观政策平稳",
+                "macro_score": 0.0,
+                "rate_cut_prob": 50.0,
+                "days_to_fomc": 14,
+                "interest_rate_target": "基准利率观察中",
+                "cpi_trend": "宏观数据平稳跟踪中",
+                "impact_summary": "macro disabled for as-of replay",
+            },
+            "ethereum_foundation": {
+                "ef_status": "NORMAL_QUIET",
+                "ef_score": 0.0,
+                "ef_treasury_eth": 0,
+                "ef_transferred_24h": 0.0,
+                "exchange_net_inflow_24h": 0.0,
+                "whale_signal": "macro disabled",
+                "summary": "macro disabled for as-of replay",
+            },
+            "etf_flows": {
+                "net_flow_usd_million": 0.0,
+                "grayscale_ethe_outflow": 0.0,
+                "blackrock_etha_inflow": 0.0,
+                "fidelity_feth_inflow": 0.0,
+                "etf_score": 0.0,
+                "trend_label": "ETF流动中性",
+                "summary": "macro disabled for as-of replay",
+            },
+            "news_count": 0,
+            "recent_news": [],
+            "event_tags": [],
+            "summary": reason,
+            "macro_disabled": True,
+            "macro_disabled_reason": reason,
+            "as_of_ms": int(as_of_ms) if as_of_ms is not None else None,
+        }
 
     def get_fed_macro_status(self):
         """
@@ -265,15 +322,43 @@ class MacroEventManager:
             "summary": summary
         }
 
-    def evaluate_composite_events(self):
+    def evaluate_composite_events(self, as_of_ms=None):
         """
         全量综合宏观突发事件评估：
         输出统一事件冲击系数 (Event Shock Score)、波动率乘数与归因标签
+
+        AUDIT_FIX_ASOF_001:
+          Historical as_of: only news with published_ts_ms <= T.
+          If timestamps missing / empty after filter, disable macro (neutral).
         """
-        news = self.fetch_live_news()
-        fed = self.get_fed_macro_status()
-        ef = self.get_ethereum_foundation_status()
-        etf = self.get_etf_flows_status()
+        news_all = self.fetch_live_news()
+        wall_ms = int(time.time() * 1000)
+        t_ms = int(as_of_ms) if as_of_ms is not None else wall_ms
+        is_historical = as_of_ms is not None and abs(t_ms - wall_ms) > 5000
+
+        if is_historical:
+            stamped = [n for n in news_all if n.get("published_ts_ms") is not None]
+            if news_all and not stamped:
+                return self._neutral_disabled_macro(
+                    t_ms, "RSS lacks published_ts; macro disabled for historical as_of"
+                )
+            news = [n for n in stamped if int(n["published_ts_ms"]) <= t_ms]
+            if not news:
+                return self._neutral_disabled_macro(
+                    t_ms, "no macro news with published_ts <= as_of; disabled"
+                )
+        else:
+            news = news_all
+
+        prev_items = self.news_items
+        self.news_items = news
+        try:
+            fed = self.get_fed_macro_status()
+            ef = self.get_ethereum_foundation_status()
+            etf = self.get_etf_flows_status()
+        finally:
+            if is_historical:
+                self.news_items = prev_items
 
         # 突发新闻最高冲击力 (针对监管、黑客、突发行业重大事件，避免与美联储/ETF 重复双重计分)
         external_news = [n for n in news[:8] if n.get("category") in ("监管与安全", "综合行业")]
@@ -332,7 +417,10 @@ class MacroEventManager:
             "news_count": len(news),
             "recent_news": news[:8],
             "event_tags": event_tags[:4],
-            "summary": f"{etf['summary']}；{fed['impact_summary']}；{ef['summary']}"
+            "summary": f"{etf['summary']}；{fed['impact_summary']}；{ef['summary']}",
+            "as_of_ms": t_ms,
+            "macro_disabled": False,
         }
-        self._save_cache(state)
+        if not is_historical:
+            self._save_cache(state)
         return state

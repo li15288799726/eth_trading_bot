@@ -100,6 +100,10 @@ def calc_adaptive_volume_regime(klines, period=30):
 def calc_adaptive_vwap_extremes(klines_5m, vwap_daily, period=72):
     """
     计算 VWAP 偏离度的滚动分位数与自适应极端边界 (动态替换硬编码的 ±1.6σ 和 ±2.2σ)
+
+    AUDIT_FIX_ASOF_001:
+      For each historical bar, z uses cumulative VWAP/σ as-of THAT bar's close
+      (BJT day-start reset), never the final-T VWAP/σ applied retroactively.
     """
     cur_z = safe_float((vwap_daily or {}).get("z_score", 0.0))
     if not vwap_daily or not klines_5m or len(klines_5m) < 12:
@@ -113,17 +117,54 @@ def calc_adaptive_vwap_extremes(klines_5m, vwap_daily, period=72):
             "is_oversold": cur_z <= -2.0
         }
 
-    vwap_val = safe_float(vwap_daily.get("vwap", 0.0))
-    sigma = safe_float(vwap_daily.get("sigma", 1.0))
-    if sigma <= 0:
-        sigma = 1.0
+    # Walk closed bars chronologically; at each bar compute day-cumulative VWAP/σ then z.
+    all_z = []
+    cur_day_start = None
+    cum_vol = 0.0
+    cum_tp_vol = 0.0
+    kl_data = []
 
-    recent_ks = klines_5m[-period:] if len(klines_5m) >= period else klines_5m
-    z_hist = []
-    for k in recent_ks:
+    for k in klines_5m:
+        open_ms = int(safe_float(k[0]))
+        dt = datetime.fromtimestamp(open_ms / 1000.0, tz=TZ_BJT)
+        day_start_ms = int(datetime(dt.year, dt.month, dt.day, tzinfo=TZ_BJT).timestamp() * 1000)
+        if cur_day_start != day_start_ms:
+            cur_day_start = day_start_ms
+            cum_vol = 0.0
+            cum_tp_vol = 0.0
+            kl_data = []
+
+        h = safe_float(k[2])
+        l = safe_float(k[3])
         c = safe_float(k[4])
-        z = (c - vwap_val) / sigma
-        z_hist.append(z)
+        v = safe_float(k[5])
+        tp = (h + l + c) / 3.0
+        cum_vol += v
+        cum_tp_vol += tp * v
+        kl_data.append((tp, v))
+
+        if cum_vol <= 0:
+            all_z.append(0.0)
+            continue
+        vwap_i = cum_tp_vol / cum_vol
+        sum_sq = sum(vv * ((ttp - vwap_i) ** 2) for ttp, vv in kl_data)
+        sigma_i = math.sqrt(sum_sq / cum_vol) if cum_vol > 0 else 0.0
+        if sigma_i <= 1e-12:
+            all_z.append(0.0)
+        else:
+            all_z.append((c - vwap_i) / sigma_i)
+
+    z_hist = all_z[-period:] if len(all_z) >= period else all_z
+    if len(z_hist) < 12:
+        return {
+            "upper_extreme_z": 2.0,
+            "lower_extreme_z": -2.0,
+            "upper_normal_z": 1.2,
+            "lower_normal_z": -1.2,
+            "current_z": cur_z,
+            "is_overbought": abs(cur_z) >= 2.0,
+            "is_oversold": cur_z <= -2.0
+        }
 
     q = calc_rolling_quantiles(z_hist, (0.08, 0.20, 0.80, 0.92))
     lower_extreme_z = round(min(-1.5, q.get(0.08, -1.8)), 2)
