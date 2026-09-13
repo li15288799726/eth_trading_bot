@@ -39,12 +39,12 @@ DEFAULT_TIMEFRAME_WEIGHTS = {
         "w_hier": 0.15,        # 大中周期层级共振 (强化 1H/1D 顺势引导，杜绝逆向打架)
         "w_cross": 0.12,       # 【阶段二新增】LightGBM 微观特征交互项权重 (限定在特征层)
         "neutral_thresh": 0.16,# 判定中性震荡门槛 (窄幅震荡严禁发假多空，坚决保持观望)
-        "min_directional_space": 6.0,  # 5M 最小期望空间底线 (大于等于6才出单，不然保持观望)
-        "min_tp1_dist": 6.0,   # 5M TP1 最低目标距离 (大于等于6点)
-        "min_tp2_dist": 9.0,   # 5M TP2 冲刺目标空间
-        "atr_tp1_mult": 1.10,  # 目标 1 ATR 乘数 (约 4.5~6.5 USDT)
-        "atr_tp2_mult": 2.00,  # 目标 2 ATR 乘数
-        "atr_sl_mult": 1.45,   # 结构失效边界乘数 (1.45 ATR，保留微观抗扰空间)
+        "min_directional_space": 6.0,  # 方案 B 空间门禁：总可用空间必须 >= 6.0 点才出单，否则保持观望
+        "min_tp1_dist": 4.0,   # 方案 B 前置 TP1 垫底 (4.0 点，命中率极高，快速保本锁定胜率)
+        "min_tp2_dist": 7.5,   # 方案 B 第二目标 TP2 冲刺 (7.5 点，冲刺完整大波段)
+        "atr_tp1_mult": 0.90,  # 目标 1 ATR 乘数 (约 3.5~4.5 USDT)
+        "atr_tp2_mult": 1.80,  # 目标 2 ATR 乘数 (约 7.0~9.0 USDT)
+        "atr_sl_mult": 1.50,   # 结构失效边界乘数 (1.50 ATR，保留 5U+ 防守空间防洗盘)
         "min_confidence": 65.0,# 基础置信度起步
     },
     "1h": {
@@ -56,12 +56,12 @@ DEFAULT_TIMEFRAME_WEIGHTS = {
         "w_macro": 0.05,       # 宏观资金面
         "w_hier": 0.12,        # 1d 宏观趋势层级引导
         "neutral_thresh": 0.14,# 1H 判定中性震荡门槛 (低于此阈值坚决保持观望)
-        "min_directional_space": 30.0, # 1H 最小期望空间底线 (不足 30 USDT 保持观望，不发多空)
-        "min_tp1_dist": 18.0,  # 1H TP1 最低目标距离
-        "min_tp2_dist": 30.0,  # 1H TP2 冲刺目标空间 (满足完整 30 点日内波段)
-        "atr_tp1_mult": 1.10,  # 目标 1 ATR 乘数 (约 16~22 USDT，贴合日内波段现实)
-        "atr_tp2_mult": 2.00,  # 目标 2 ATR 乘数 (约 30~42 USDT)
-        "atr_sl_mult": 1.50,   # 结构失效边界乘数 (1.50 ATR)
+        "min_directional_space": 20.0, # 方案 B 1H 最小期望空间底线 (20 USDT，贴合日内波段现实)
+        "min_tp1_dist": 12.0,  # 方案 B 1H TP1 最低目标距离 (12.0 USDT，覆盖历史获胜均值)
+        "min_tp2_dist": 25.0,  # 方案 B 1H TP2 冲刺目标空间 (25.0 USDT，满足日内大波段)
+        "atr_tp1_mult": 0.90,  # 目标 1 ATR 乘数 (约 12~16 USDT)
+        "atr_tp2_mult": 1.80,  # 目标 2 ATR 乘数 (约 25~32 USDT)
+        "atr_sl_mult": 1.40,   # 结构失效边界乘数 (1.40 ATR)
         "min_confidence": 68.0,
     },
     "1d": {
@@ -749,14 +749,14 @@ class ETHPredictor:
             else:
                 dir_label = "宏观偏多" if direction == "UP" else "宏观偏空"
 
-        # 动态目标位置与结构失效线计算 (结合用户要求：5M>=6点, 1H>=30点, 1D>=60点)
-        min_space_req = weights.get("min_directional_space", 6.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
-        cfg_min_tp1 = weights.get("min_tp1_dist", 6.0 if tf == "5m" else (18.0 if tf == "1h" else 35.0))
-        cfg_min_tp2 = weights.get("min_tp2_dist", 9.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
+        # 动态目标位置与结构失效线计算 (方案 B：5M 空间>=6点但TP1前置保本, 1H>=20点, 1D>=60点)
+        min_space_req = weights.get("min_directional_space", 6.0 if tf == "5m" else (20.0 if tf == "1h" else 60.0))
+        cfg_min_tp1 = weights.get("min_tp1_dist", 4.0 if tf == "5m" else (12.0 if tf == "1h" else 35.0))
+        cfg_min_tp2 = weights.get("min_tp2_dist", 7.5 if tf == "5m" else (25.0 if tf == "1h" else 60.0))
 
         min_tp1_dist = max(atr * k_tp1 * 0.70, cfg_min_tp1)
-        min_tp2_step = max(round(atr * 0.40, 2), 3.0 if tf == "5m" else (10.0 if tf == "1h" else 20.0))
-        min_sl_dist = max(round(atr * 0.50, 2), 4.5 if tf == "5m" else (10.0 if tf == "1h" else 22.0))
+        min_tp2_step = max(round(atr * 0.40, 2), 2.5 if tf == "5m" else (8.0 if tf == "1h" else 20.0))
+        min_sl_dist = max(round(atr * 0.50, 2), 5.0 if tf == "5m" else (12.0 if tf == "1h" else 22.0))
 
         vp = volume_profile or {}
         poc = safe_float(vp.get("poc"))
@@ -872,11 +872,18 @@ class ETHPredictor:
             expected_change_pct = 0.0
             attribution_tags.append(f"空间受限(<{min_space_req:.0f}点)")
         elif direction in ("UP", "DOWN"):
-            # 空间核验通过，确保 tp2 满足第二目标冲刺距离
+            # 空间核验通过：总波段空间 >= min_space_req 点！
+            # 方案 B 核心执行：前置第一目标 TP1 设为 3.8~4.5 点用于快速保本，第二目标 TP2 设为 7.0~9.0 点冲刺完整大波段
             if direction == "UP":
+                tp1 = round(min(tp1, price + cfg_min_tp1 + max(0.5, atr * 0.3)), 2)
+                tp1 = max(tp1, round(price + cfg_min_tp1, 2))
+                tp2 = max(tp2, round(tp1 + min_tp2_step, 2))
                 tp2 = max(tp2, round(price + cfg_min_tp2, 2))
                 target_range = f"{tp1:.2f} ~ {tp2:.2f}"
             else:
+                tp1 = round(max(tp1, price - cfg_min_tp1 - max(0.5, atr * 0.3)), 2)
+                tp1 = min(tp1, round(price - cfg_min_tp1, 2))
+                tp2 = min(tp2, round(tp1 - min_tp2_step, 2))
                 tp2 = min(tp2, round(price - cfg_min_tp2, 2))
                 target_range = f"{tp2:.2f} ~ {tp1:.2f}"
 

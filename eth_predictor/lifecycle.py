@@ -258,9 +258,9 @@ class PredictionLifecycleManager:
                 if score < 0.32:
                     return False
 
-        # 6. 空间门槛硬核校验 (用户明确要求：5M 预期空间 >= 6 点才出单，否则保持观望；1H>=30, 1D>=60)
+        # 6. 空间门槛硬核校验 (方案 B：5M 总空间 >= 6 点才出单，1H >= 20 点，否则保持观望)
         if direction in ("UP", "DOWN"):
-            req_space = 6.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0)
+            req_space = 6.0 if tf == "5m" else (20.0 if tf == "1h" else 60.0)
             base_p = safe_float(raw_pred.get("base_price", 0.0))
             tp1_p = safe_float(raw_pred.get("tp1", 0.0))
             tp2_p = safe_float(raw_pred.get("tp2", 0.0))
@@ -926,7 +926,7 @@ class PredictionLifecycleManager:
                 return True, dev_score, reason_str, is_extreme_reversal, reverse_dir, price_loss
 
         dev_score = round(dev_score, 3)
-        dev_thresh = 0.75 if tf == "1d" else (0.62 if tf == "1h" else 0.55)
+        dev_thresh = 0.75 if tf == "1d" else (0.62 if tf == "1h" else 0.60)
         is_deviated = (dev_score >= dev_thresh)
         if is_deviated:
             reason_str = f"⚠️ {aux_label}辅助窗口判定趋势严重偏离 (偏离度={dev_score:.2f} >= {dev_thresh:.2f}): {'; '.join(reasons)}"
