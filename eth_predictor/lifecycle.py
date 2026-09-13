@@ -274,8 +274,8 @@ class PredictionLifecycleManager:
                     dt = datetime.now(TZ_BJT)
                 is_wk = (dt.weekday() in (5, 6))
 
-            default_space = (3.2 if is_wk else 6.0) if tf == "5m" else ((10.0 if is_wk else 20.0) if tf == "1h" else 60.0)
-            req_space = safe_float(raw_pred.get("min_space_req", default_space))
+            default_space = 6.0 if tf == "5m" else ((15.0 if is_wk else 20.0) if tf == "1h" else 60.0)
+            req_space = max(6.0 if tf == "5m" else 12.0, safe_float(raw_pred.get("min_space_req", default_space)))
             base_p = safe_float(raw_pred.get("base_price", 0.0))
             tp1_p = safe_float(raw_pred.get("tp1", 0.0))
             tp2_p = safe_float(raw_pred.get("tp2", 0.0))

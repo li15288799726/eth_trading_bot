@@ -370,23 +370,43 @@ class ETHPredictor:
         regime_code = market_regime.get("regime", "RANGE_CONSOLIDATION")
         is_1h_consolidating = (bw_1h <= 3.2) and (regime_code == "RANGE_CONSOLIDATION")
 
-        # 周末假突破过滤：周末缺乏流动性，突破需极高成交量 (vol_ratio >= 1.8) 并有日线趋势协同，否则坚决视作假突破
-        req_breakout_vol_1h = 1.8 if is_weekend else 1.4
-        is_1h_breakout_up = (price >= rhigh_1h - 2.0) and (vol_ratio >= req_breakout_vol_1h) and (oi_matrix_1h["signal"] >= 0.15) and (not is_weekend or composite_1d >= 0.25)
-        is_1h_breakout_down = (price <= rlow_1h + 2.0) and (vol_ratio >= req_breakout_vol_1h) and (oi_matrix_1h["signal"] <= -0.15) and (not is_weekend or composite_1d <= -0.25)
+        # 1H K线微观动量与影线形态提取 (用于 1H 独立研判与动量刹车)
+        last_bar_1h = kl_1h[-1] if (kl_1h and len(kl_1h) >= 1) else None
+        if last_bar_1h:
+            o_1h = safe_float(last_bar_1h[1])
+            h_1h = safe_float(last_bar_1h[2])
+            l_1h = safe_float(last_bar_1h[3])
+            c_1h = safe_float(last_bar_1h[4])
+            hl_1h = max(0.1, h_1h - l_1h)
+            body_ratio_1h = abs(c_1h - o_1h) / hl_1h
+            upper_wick_1h = (h_1h - max(o_1h, c_1h)) / hl_1h
+            lower_wick_1h = (min(o_1h, c_1h) - l_1h) / hl_1h
+            is_bleeding_down_1h = (c_1h < o_1h) and (body_ratio_1h >= 0.38) and (lower_wick_1h < 0.18)
+            is_surging_up_1h = (c_1h > o_1h) and (body_ratio_1h >= 0.38) and (upper_wick_1h < 0.18)
+        else:
+            lower_wick_1h, upper_wick_1h, is_bleeding_down_1h, is_surging_up_1h = 0.3, 0.3, False, False
 
-        # 1H 顶部接空判定 (Range Ceiling Short Zone):
-        # 排除 1D 宏观主升突破 且现价位于 POC 之上
-        is_1h_at_ceiling = (not is_1h_breakout_up) and (composite_1d < 0.25) and (price >= poc_1h) and (
+        # 1H 独立动量刹车：
+        # 1) 空头大单主动增仓狂暴砸盘中，严禁盲目在通道下轨摸底接多！
+        is_1h_short_dumping = is_bleeding_down_1h or (oi_delta_1h > 5000.0 and px_chg_1h < -4.0 and lower_wick_1h < 0.18) or (oi_matrix_1h["signal"] <= -0.28 and lower_wick_1h < 0.18)
+        # 2) 多头大单主动增仓狂暴逼空中，严禁盲目在通道上轨摸顶接空！
+        is_1h_long_surging = is_surging_up_1h or (oi_delta_1h > 5000.0 and px_chg_1h > 4.0 and upper_wick_1h < 0.18) or (oi_matrix_1h["signal"] >= 0.28 and upper_wick_1h < 0.18)
+
+        # 1H 突破判定 (100% 独立研判，不顺应 1D 大周期)
+        req_breakout_vol_1h = 1.8 if is_weekend else 1.4
+        is_1h_breakout_up = (price >= rhigh_1h - 2.0) and (vol_ratio >= req_breakout_vol_1h) and (oi_matrix_1h["signal"] >= 0.15)
+        is_1h_breakout_down = (price <= rlow_1h + 2.0) and (vol_ratio >= req_breakout_vol_1h) and (oi_matrix_1h["signal"] <= -0.15)
+
+        # 1H 顶部接空判定 (Range Ceiling Short Zone) - 独立研判，排除多头狂暴逼空途中
+        is_1h_at_ceiling = (not is_1h_breakout_up) and (not is_1h_long_surging) and (price >= poc_1h) and (
             (price >= vah_1h - 3.0) or
             (pct_b_1h >= 0.80) or
             (pivots_1h and price >= pivots_1h.get("r1", 99999) - 2.0) or
             (is_weekend and price >= rhigh_1h - 1.5)
         )
 
-        # 1H 底部接多判定 (Range Floor Long Zone):
-        # 排除 1D 宏观主跌击穿 且现价位于 POC 之下
-        is_1h_at_floor = (not is_1h_breakout_down) and (composite_1d > -0.25) and (price <= poc_1h) and (
+        # 1H 底部接多判定 (Range Floor Long Zone) - 独立研判，排除空头狂暴下杀途中
+        is_1h_at_floor = (not is_1h_breakout_down) and (not is_1h_short_dumping) and (price <= poc_1h) and (
             (price <= val_1h + 3.0) or
             (pct_b_1h <= 0.20) or
             (pivots_1h and price <= pivots_1h.get("s1", 0) + 2.0) or
@@ -405,19 +425,19 @@ class ETHPredictor:
             s_vwap_1h = max(-1.0, min(-0.3, (price - poc_1h) / max(1.0, atr_1h)))
             s_tech_1h = -0.50
         elif is_1h_at_ceiling:
-            # 1H 顶部接空：向日内筹码核心 POC / VWAP 均值回归
+            # 1H 顶部接空：向 1H 价值中枢 POC / VWAP 均值回归 (必须处于非狂暴逼空态)
             s_vwap_1h = -0.75
             s_tech_1h = -0.60
-            s_oi_1h = -0.25
+            s_oi_1h = min(0.10, oi_matrix_1h["signal"] - 0.20)
             if s_pos_1h > 0:
-                s_pos_1h = -0.10
+                s_pos_1h = -0.05
         elif is_1h_at_floor:
-            # 1H 底部接多：向日内筹码核心 POC / VWAP 均值回归
+            # 1H 底部接多：向 1H 价值中枢 POC / VWAP 均值回归 (必须处于非狂暴砸盘态)
             s_vwap_1h = 0.75
             s_tech_1h = 0.60
-            s_oi_1h = 0.25
+            s_oi_1h = max(-0.10, oi_matrix_1h["signal"] + 0.20)
             if s_pos_1h < 0:
-                s_pos_1h = 0.10
+                s_pos_1h = 0.05
         else:
             if vwap_daily:
                 s_vwap_1h = min(0.3, max(-0.3, (vwap_daily.get("slope", 0) / 4.0)))
@@ -425,14 +445,14 @@ class ETHPredictor:
                 s_vwap_1h = 0.0
             s_tech_1h = (ema_ribbon_1h.get("score", 0.0) * 0.5) + (rsi_score_1h * 0.3)
 
+        # 1H 周期保持 100% 独立判断，彻底移除 1D 宏观层级引导，赋能捕捉独立小时级波段与超跌反弹
         composite_1h = (
             w1h["w_vwap"] * s_vwap_1h +
             w1h["w_oi"] * s_oi_1h +
             w1h["w_pos"] * s_pos_1h +
             w1h["w_liq"] * s_liq_1h +
             w1h["w_tech"] * s_tech_1h +
-            w1h.get("w_macro", 0.05) * s_macro +
-            w1h.get("w_hier", 0.10) * composite_1d  # 宏观趋势层级引导
+            w1h.get("w_macro", 0.05) * s_macro
         )
         composite_1h = max(-1.0, min(1.0, composite_1h))
         atr_1h_scaled = atr_1h * vol_mult
@@ -553,7 +573,8 @@ class ETHPredictor:
 
         # 特例：极端单边放量真突破 vs 极值见顶/恐慌见底高抛低吸
         is_volume_surge = bool(vol_regime_5m.get("is_surge"))
-        min_space_5m = w5.get("min_directional_space", 6.0)
+        # 严格执行用户原则 1：判断上涨或下跌空间不足 6 点时，坚决不做判断（保持观望）
+        min_space_5m = max(6.0, safe_float(w5.get("min_directional_space", 6.0)))
 
         # 底部见底判定：当出现巨量或价格击穿 rlow_5m 时，必须严格区分“真破位”与“恐慌抛盘见底 (Selling Climax)”
         is_selling_climax_bottom = (
@@ -574,17 +595,29 @@ class ETHPredictor:
         composite_5m = 0.0
 
         if is_volume_surge and is_buying_climax_top:
-            # 顶部冲高见顶衰竭：反向接空
-            custom_5m_dir = "DOWN"
-            custom_5m_label = "🎯 冲高动能衰竭·顶部接空" if not is_weekend else "🛋️ 周末冲高遇阻·顶部接空"
-            composite_5m = -0.45
-            is_5m_at_ceiling = True
+            # 顶部冲高见顶衰竭：反向接空（核验空间：不足 6 点坚决不做判断）
+            has_down_climax_space = (price - val_5m >= min_space_5m) or (price - rlow_5m >= min_space_5m)
+            if has_down_climax_space:
+                custom_5m_dir = "DOWN"
+                custom_5m_label = "🎯 冲高动能衰竭·顶部接空" if not is_weekend else "🛋️ 周末冲高遇阻·顶部接空"
+                composite_5m = -0.45
+                is_5m_at_ceiling = True
+            else:
+                custom_5m_dir = "NEUTRAL"
+                custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
+                composite_5m = 0.0
         elif is_volume_surge and is_selling_climax_bottom:
-            # 底部恐慌抛盘见底：反向接多
-            custom_5m_dir = "UP"
-            custom_5m_label = "🎯 恐慌抛盘见底·极值接多" if not is_weekend else "🛋️ 周末插针见底·反弹接多"
-            composite_5m = 0.45
-            is_5m_at_floor = True
+            # 底部恐慌抛盘见底：反向接多（核验空间：不足 6 点坚决不做判断）
+            has_up_climax_space = (vah_5m - price >= min_space_5m) or (rhigh_5m - price >= min_space_5m)
+            if has_up_climax_space:
+                custom_5m_dir = "UP"
+                custom_5m_label = "🎯 恐慌抛盘见底·极值接多" if not is_weekend else "🛋️ 周末插针见底·反弹接多"
+                composite_5m = 0.45
+                is_5m_at_floor = True
+            else:
+                custom_5m_dir = "NEUTRAL"
+                custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
+                composite_5m = 0.0
         elif is_volume_surge and (price >= rhigh_5m - 0.5) and (s_oi_5m > 0.25) and (not is_weekend) and (upper_wick_ratio < 0.20) and (strategic_1h != "DOWN"):
             # 工作日真突破追多 (周末严禁追突破)
             custom_5m_dir = "UP"
@@ -620,7 +653,7 @@ class ETHPredictor:
             else:
                 custom_5m_dir = "NEUTRAL"
                 if not has_upward_space:
-                    custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·保持观望"
+                    custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
                 elif not is_macro_safe:
                     custom_5m_label = "⏳ 宏观利空承压·5M暂停接多观望"
                 else:
@@ -649,7 +682,7 @@ class ETHPredictor:
             else:
                 custom_5m_dir = "NEUTRAL"
                 if not has_downward_space:
-                    custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·保持观望"
+                    custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
                 elif not is_macro_safe:
                     custom_5m_label = "⏳ 宏观利好支撑·5M暂停接空观望"
                 else:
@@ -689,7 +722,7 @@ class ETHPredictor:
                     is_5m_at_floor = True
                 else:
                     custom_5m_dir = "NEUTRAL"
-                    custom_5m_label = f"⏳ 5M箱体空间不足{min_space_5m:.1f}点·保持观望" if (not has_box_up_space or box_width < min_space_5m) else "⏳ 宏观利空承压·5M箱底暂停接多"
+                    custom_5m_label = f"⏳ 5M箱体空间不足{min_space_5m:.1f}点·不做判断" if (not has_box_up_space or box_width < min_space_5m) else "⏳ 宏观利空承压·5M箱底暂停接多"
                     composite_5m = 0.0
             elif is_valid_top:
                 if has_box_down_space and box_width >= min_space_5m and s_macro < 0.25:
@@ -699,7 +732,7 @@ class ETHPredictor:
                     is_5m_at_ceiling = True
                 else:
                     custom_5m_dir = "NEUTRAL"
-                    custom_5m_label = f"⏳ 5M箱体空间不足{min_space_5m:.1f}点·保持观望" if (not has_box_down_space or box_width < min_space_5m) else "⏳ 宏观利好支撑·5M箱顶暂停接空"
+                    custom_5m_label = f"⏳ 5M箱体空间不足{min_space_5m:.1f}点·不做判断" if (not has_box_down_space or box_width < min_space_5m) else "⏳ 宏观利好支撑·5M箱顶暂停接空"
                     composite_5m = 0.0
             elif is_bleeding_downtrend:
                 custom_5m_dir = "NEUTRAL"
@@ -836,11 +869,11 @@ class ETHPredictor:
             else:
                 dir_label = "宏观偏多" if direction == "UP" else "宏观偏空"
 
-        # 动态目标位置与结构失效线计算 (方案 B：5M 空间>=6点但TP1前置保本, 1H>=20点, 1D>=60点，融入周内/周末自适应)
-        min_space_req = weights.get("min_directional_space", 6.0 if tf == "5m" else (20.0 if tf == "1h" else 60.0))
-        cfg_min_tp1 = weights.get("min_tp1_dist", 4.0 if tf == "5m" else (12.0 if tf == "1h" else 35.0))
-        cfg_min_tp2 = weights.get("min_tp2_dist", 7.5 if tf == "5m" else (25.0 if tf == "1h" else 60.0))
-        cfg_min_sl = weights.get("min_sl_dist", 5.0 if tf == "5m" else (12.0 if tf == "1h" else 22.0))
+        # 动态目标位置与结构失效线计算 (用户原则 1：5M 研判空间不足 6 点不做判断，1H>=15点, 1D>=60点)
+        min_space_req = max(6.0, safe_float(weights.get("min_directional_space", 6.0))) if tf == "5m" else safe_float(weights.get("min_directional_space", 15.0 if tf == "1h" else 60.0))
+        cfg_min_tp1 = weights.get("min_tp1_dist", 4.0 if tf == "5m" else (10.0 if tf == "1h" else 35.0))
+        cfg_min_tp2 = weights.get("min_tp2_dist", 7.5 if tf == "5m" else (20.0 if tf == "1h" else 60.0))
+        cfg_min_sl = weights.get("min_sl_dist", 4.5 if tf == "5m" else (10.0 if tf == "1h" else 22.0))
 
         min_tp1_dist = max(atr * k_tp1 * 0.70, cfg_min_tp1)
         min_tp2_step = max(round(atr * 0.40, 2), 1.8 if tf == "5m" else (6.0 if tf == "1h" else 20.0))
@@ -1000,14 +1033,14 @@ class ETHPredictor:
         if direction in ("UP", "DOWN") and avail_space < min_space_req:
             direction = "NEUTRAL"
             dir_icon = "⏸️"
-            dir_label = f"空间受限观望 (<{min_space_req:.0f}点)"
+            dir_label = f"空间不足{min_space_req:.0f}点·不做判断"
             confidence = base_conf
             tp1 = 0.0
             tp2 = 0.0
             sl = 0.0
             target_range = "--"
             expected_change_pct = 0.0
-            attribution_tags.append(f"空间受限(<{min_space_req:.0f}点)")
+            attribution_tags.append(f"空间不足(<{min_space_req:.0f}点)")
         elif direction in ("UP", "DOWN"):
             # 空间核验通过：总波段空间 >= min_space_req 点！
             # 方案 B 核心执行：前置第一目标 TP1 设为 3.8~4.5 点用于快速保本，第二目标 TP2 设为 7.0~9.0 点冲刺完整大波段

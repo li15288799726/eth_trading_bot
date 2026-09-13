@@ -64,15 +64,15 @@ def get_calendar_market_regime(as_of_ts=None):
         regime_name = "WEEKEND_REST"
         regime_label = f"{day_name}·休息日 (极低成交量/窄幅防假破位)"
         vol_expected = "LOW"
-        # 周末低流动性：自适应压缩空间门禁与目标点位，防止目标过远超时或门禁过大永远观望
-        space_5m = 3.2
-        tp1_5m = 2.2
-        tp2_5m = 4.8
-        sl_5m = 3.2
-        space_1h = 10.0
-        tp1_1h = 6.0
-        tp2_1h = 14.0
-        sl_1h = 8.0
+        # 周末低流动性：自适应保持空间底线 >= 6.0 点（研判涨跌空间不足 6 点不做判断），按阶梯保本目标配置
+        space_5m = 6.0
+        tp1_5m = 4.0
+        tp2_5m = 7.5
+        sl_5m = 4.5
+        space_1h = 15.0
+        tp1_1h = 10.0
+        tp2_1h = 20.0
+        sl_1h = 10.0
     else:
         regime_name = "WEEKDAY_TRADING"
         regime_label = f"{day_name}·活跃交易日 (高流动性/大波段顺势)"
