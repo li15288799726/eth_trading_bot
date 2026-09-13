@@ -61,10 +61,10 @@
 
   /* 汇总指标卡片 */
   .stats-grid {
-    display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px;
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; margin-bottom: 16px;
   }
-  @media(max-width: 1200px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
-  @media(max-width: 600px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media(max-width: 1400px) { .stats-grid { grid-template-columns: repeat(4, 1fr); } }
+  @media(max-width: 900px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
 
   .stat-card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -212,6 +212,11 @@
       <div class="sub">第一目标达成锁定</div>
     </div>
     <div class="stat-card">
+      <div class="lbl">⚠️ 偏离风控离场</div>
+      <div class="val" id="statDevStop" style="color:var(--gold)">-- 笔</div>
+      <div class="sub">动能反转止损/保本</div>
+    </div>
+    <div class="stat-card">
       <div class="lbl">🛑 触及止损出局</div>
       <div class="val down" id="statSlFail">-- 笔</div>
       <div class="sub">方向偏差止损出清</div>
@@ -331,13 +336,14 @@ function renderStats(metrics) {
   document.getElementById("statTotal").innerText = `${total} 笔`;
   document.getElementById("statSubTotal").innerText = `已验真: ${verified} · 待验: ${pending}`;
 
-  let fullWins = 0, partialWins = 0, slFails = 0, timeoutFails = 0, wins = 0;
+  let fullWins = 0, partialWins = 0, slFails = 0, timeoutFails = 0, devStops = 0, wins = 0;
   rawHistory.forEach(h => {
     const res = h.verified_result || {};
     const outcome = res.outcome || '';
     if (outcome === 'FULL_WIN') { fullWins++; wins++; }
-    else if (outcome === 'TP1_WIN_TP2_FAILED' || outcome === 'TP1_WIN') { partialWins++; wins++; }
+    else if (outcome === 'TP1_WIN_TP2_FAILED' || outcome === 'TP1_WIN' || outcome === 'DEV_PROFIT_EXIT') { partialWins++; wins++; }
     else if (outcome === 'DIR_WIN') { partialWins++; wins++; }
+    else if (outcome === 'DEVIATION_STOP' || outcome === 'DEV_STOP') { devStops++; }
     else if (outcome === 'SL_FAILED') { slFails++; }
     else if (outcome === 'TIMEOUT_FAILED' || outcome === 'DIR_FAILED') { timeoutFails++; }
     else if (res.direction_correct) { wins++; }
@@ -348,6 +354,8 @@ function renderStats(metrics) {
   document.getElementById("statSubWin").innerText = `胜: ${wins} / 负: ${verified - wins} 笔`;
   document.getElementById("statFullWin").innerText = `${fullWins} 笔`;
   document.getElementById("statPartialWin").innerText = `${partialWins} 笔`;
+  const devEl = document.getElementById("statDevStop");
+  if (devEl) devEl.innerText = `${devStops} 笔`;
   document.getElementById("statSlFail").innerText = `${slFails} 笔`;
   document.getElementById("statTimeoutFail").innerText = `${timeoutFails} 笔`;
 }
@@ -382,7 +390,8 @@ function renderTable() {
     const outcome = res.outcome || (h.status === 'ACTIVE' ? 'ACTIVE' : '');
     if (currentOutcome !== 'ALL') {
       if (currentOutcome === 'FULL_WIN' && outcome !== 'FULL_WIN') return false;
-      if (currentOutcome === 'TP1_WIN_TP2_FAILED' && (outcome !== 'TP1_WIN_TP2_FAILED' && outcome !== 'TP1_WIN')) return false;
+      if (currentOutcome === 'TP1_WIN_TP2_FAILED' && !['TP1_WIN_TP2_FAILED', 'TP1_WIN', 'DIR_WIN', 'DEV_PROFIT_EXIT'].includes(outcome)) return false;
+      if (currentOutcome === 'DEVIATION_STOP' && !['DEVIATION_STOP', 'DEV_STOP'].includes(outcome)) return false;
       if (currentOutcome === 'SL_FAILED' && outcome !== 'SL_FAILED') return false;
       if (currentOutcome === 'TIMEOUT_FAILED' && outcome !== 'TIMEOUT_FAILED') return false;
     }
@@ -418,6 +427,7 @@ function renderTable() {
       if (outcome === 'FULL_WIN') badgeHtml = '<span class="badge success">🏆 双目标大胜</span>';
       else if (outcome === 'TP1_WIN_TP2_FAILED') badgeHtml = '<span class="badge success">✅ 阶段胜单 (TP1胜/TP2败)</span>';
       else if (outcome === 'TP1_WIN') badgeHtml = '<span class="badge success">🎯 目标1达成胜</span>';
+      else if (outcome === 'DEV_PROFIT_EXIT') badgeHtml = '<span class="badge success">💰 偏离获利落袋</span>';
       else if (outcome === 'DIR_WIN') badgeHtml = '<span class="badge success">🟢 到期方向正确</span>';
       else if (outcome === 'RANGE_NEUTRAL') badgeHtml = '<span class="badge warn">⚖️ 区间微幅震荡</span>';
       else if (outcome === 'DEVIATION_STOP') badgeHtml = '<span class="badge warn">⚠️ 趋势偏离风控离场</span>';
@@ -464,9 +474,9 @@ function renderTable() {
             <!-- 2. 目标与止损执行详情 -->
             <div class="detail-sec">
               <div class="detail-sec-title">🎯 目标与防守执行明细</div>
-              <div class="detail-kv"><span class="k">目标位 1 (TP1):</span><span class="v ${p.direction === 'UP' ? 'up' : 'down'}">${p.tp1 ? p.tp1.toFixed(2) : '--'} (${(res && res.tp1_hit) ? '✅ 达成' : (p.tp1_status === 'REACHED' ? '✅ 已达成' : '❌ 未达')})</span></div>
-              <div class="detail-kv"><span class="k">目标位 2 (TP2):</span><span class="v ${p.direction === 'UP' ? 'up' : 'down'}">${p.tp2 ? p.tp2.toFixed(2) : '--'} (${(res && res.tp2_hit) ? '✅ 双达标' : (p.tp2_status === 'REACHED' ? '✅ 达成' : '❌ 未达成')})</span></div>
-              <div class="detail-kv"><span class="k">失效止损 (SL):</span><span class="v ${p.direction === 'UP' ? 'down' : 'up'}">${p.sl ? p.sl.toFixed(2) : '--'} (${(res && res.sl_hit) ? '🛑 触线止损' : '安全未碰'})</span></div>
+              <div class="detail-kv"><span class="k">目标位 1 (TP1):</span><span class="v ${p.direction === 'UP' ? 'up' : 'down'}">${p.tp1 ? p.tp1.toFixed(2) : '--'} (${(res && res.tp1_hit) ? '✅ 达成' : (p.tp1_status === 'REACHED' ? '✅ 已达成' : (!res || p.status === 'ACTIVE' ? '⏳ 追踪中' : '❌ 未达'))})</span></div>
+              <div class="detail-kv"><span class="k">目标位 2 (TP2):</span><span class="v ${p.direction === 'UP' ? 'up' : 'down'}">${p.tp2 ? p.tp2.toFixed(2) : '--'} (${(res && res.tp2_hit) ? '✅ 双达标' : (p.tp2_status === 'REACHED' ? '✅ 达成' : (!res || p.status === 'ACTIVE' ? (p.stage === 'STAGE_TP2' ? '🚀 冲刺中' : '⏳ 待激活') : '❌ 未达成'))})</span></div>
+              <div class="detail-kv"><span class="k">失效止损 (SL):</span><span class="v ${p.direction === 'UP' ? 'down' : 'up'}">${p.sl ? p.sl.toFixed(2) : '--'} (${(res && res.sl_hit) ? '🛑 触线止损' : (!res || p.status === 'ACTIVE' ? (p.sl_breached ? '🛑 触线' : '🛡️ 防守中') : '安全未碰')})</span></div>
               <div class="detail-kv"><span class="k">超时保护时限:</span><span class="v muted">${p.timeout_candles || 24} 根 K 线</span></div>
               <div class="detail-kv"><span class="k">终结原因:</span><span class="v" style="font-size:10px">${exitReason}</span></div>
             </div>

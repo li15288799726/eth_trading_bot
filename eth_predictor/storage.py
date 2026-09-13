@@ -26,7 +26,7 @@ class PredictionStorage:
         self.history_file = HISTORY_FILE
         self.config_file = CONFIG_FILE
         self.review_md_file = REVIEW_MD_FILE
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self._init_files()
 
     def _atomic_write_json(self, target_file, data, max_keep=None):

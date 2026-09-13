@@ -1710,6 +1710,8 @@ function renderHistoryTable(predictions) {
         badgeHtml = '<span class="badge success" style="font-size:9.5px">✅ 阶段胜单 (TP1胜/TP2败)</span>';
       } else if (res.outcome === "TP1_WIN") {
         badgeHtml = '<span class="badge success" style="font-size:9.5px">🎯 目标1达成胜</span>';
+      } else if (res.outcome === "DEV_PROFIT_EXIT") {
+        badgeHtml = '<span class="badge success" style="font-size:9.5px">💰 偏离获利落袋</span>';
       } else if (res.outcome === "DIR_WIN") {
         badgeHtml = '<span class="badge success" style="font-size:9.5px">🟢 到期方向正确</span>';
       } else if (res.outcome === "RANGE_NEUTRAL") {

@@ -69,7 +69,7 @@ class BinanceFuturesFeed:
         self.last_ws_message_time = 0.0
         self.ws_thread = None
         self._stop_ws = threading.Event()
-        self.data_lock = threading.Lock()
+        self.data_lock = threading.RLock()
 
         # 实时爆仓事件流缓存 (@forceOrder)
         self.liquidations_history = []
