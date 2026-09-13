@@ -39,11 +39,11 @@ DEFAULT_TIMEFRAME_WEIGHTS = {
         "w_hier": 0.15,        # 大中周期层级共振 (强化 1H/1D 顺势引导，杜绝逆向打架)
         "w_cross": 0.12,       # 【阶段二新增】LightGBM 微观特征交互项权重 (限定在特征层)
         "neutral_thresh": 0.16,# 判定中性震荡门槛 (窄幅震荡严禁发假多空，坚决保持观望)
-        "min_directional_space": 8.0,  # 5M 最小期望空间底线 (不足 8~10 USDT 保持观望，杜绝鸡肋刷单)
-        "min_tp1_dist": 6.0,   # 5M TP1 最低目标距离 (确保覆盖双向手续费与微观滑点)
-        "min_tp2_dist": 10.0,  # 5M TP2 冲刺目标空间 (满足完整 10 点波段空间)
+        "min_directional_space": 6.0,  # 5M 最小期望空间底线 (大于等于6才出单，不然保持观望)
+        "min_tp1_dist": 6.0,   # 5M TP1 最低目标距离 (大于等于6点)
+        "min_tp2_dist": 9.0,   # 5M TP2 冲刺目标空间
         "atr_tp1_mult": 1.10,  # 目标 1 ATR 乘数 (约 4.5~6.5 USDT)
-        "atr_tp2_mult": 2.20,  # 目标 2 ATR 乘数 (约 9.0~14.0 USDT)
+        "atr_tp2_mult": 2.00,  # 目标 2 ATR 乘数
         "atr_sl_mult": 1.45,   # 结构失效边界乘数 (1.45 ATR，保留微观抗扰空间)
         "min_confidence": 65.0,# 基础置信度起步
     },
@@ -547,17 +547,23 @@ class ETHPredictor:
 
             is_pullback_ready = (is_near_poc or is_near_val or is_near_vwap or is_wick_absorption)
             is_flow_healthy = (cvd_5m["score"] >= -0.35) and (s_oi_5m >= -0.35) and (s_cross_mom >= -0.45)
-            # 空间核验：向上至阻力区需至少具备 6.5~8 点可用波段空间，严禁顶在天花板上接多
-            has_upward_space = (vah_5m - price >= 6.5) or (price >= rhigh_5m - 0.5)
+            # 空间核验：向上至阻力区需至少具备 6.0 点可用波段空间，严禁顶在天花板上接多
+            has_upward_space = (vah_5m - price >= 6.0) or (rhigh_5m - price >= 6.0)
+            is_macro_safe = (s_macro > -0.25)
 
-            if is_pullback_ready and is_flow_healthy and has_upward_space:
+            if is_pullback_ready and is_flow_healthy and has_upward_space and is_macro_safe:
                 custom_5m_dir = "UP"
                 custom_5m_label = "🎯 1H顺势·5M回踩吸筹接多"
                 composite_5m = max(0.24, round(score_1h * 0.60 + 0.22 + 0.12 * s_cross_mom, 3))
                 is_5m_at_floor = True
             else:
                 custom_5m_dir = "NEUTRAL"
-                custom_5m_label = "⏳ 1H顺势看涨·5M空间受阻(接近阻力)" if not has_upward_space else "⏳ 1H顺势看涨·5M脉冲观望(等待回踩)"
+                if not has_upward_space:
+                    custom_5m_label = "⏳ 5M空间不足6点·保持观望"
+                elif not is_macro_safe:
+                    custom_5m_label = "⏳ 宏观利空承压·5M暂停接多观望"
+                else:
+                    custom_5m_label = "⏳ 1H顺势看涨·5M脉冲观望(等待回踩)"
                 composite_5m = 0.05
         elif strategic_1h == "DOWN":
             # -----------------------------------------------------------------
@@ -570,39 +576,60 @@ class ETHPredictor:
 
             is_rally_ready = (is_near_poc or is_near_vah or is_near_vwap or is_wick_exhaustion)
             is_flow_healthy = (cvd_5m["score"] <= 0.35) and (s_oi_5m <= 0.35) and (s_cross_mom <= 0.45)
-            # 空间核验：向下至支撑区需至少具备 6.5~8 点可用波段空间，严禁砸在地板上接空
-            has_downward_space = (price - val_5m >= 6.5) or (price <= rlow_5m + 0.5)
+            # 空间核验：向下至支撑区需至少具备 6.0 点可用波段空间，严禁砸在地板上接空
+            has_downward_space = (price - val_5m >= 6.0) or (price - rlow_5m >= 6.0)
+            is_macro_safe = (s_macro < 0.25)
 
-            if is_rally_ready and is_flow_healthy and has_downward_space:
+            if is_rally_ready and is_flow_healthy and has_downward_space and is_macro_safe:
                 custom_5m_dir = "DOWN"
                 custom_5m_label = "🎯 1H顺势·5M反弹阻力接空"
                 composite_5m = min(-0.24, round(score_1h * 0.60 - 0.22 + 0.12 * s_cross_mom, 3))
                 is_5m_at_ceiling = True
             else:
                 custom_5m_dir = "NEUTRAL"
-                custom_5m_label = "⏳ 1H顺势看跌·5M空间受阻(接近支撑)" if not has_downward_space else "⏳ 1H顺势看跌·5M下探观望(等待反弹)"
+                if not has_downward_space:
+                    custom_5m_label = "⏳ 5M空间不足6点·保持观望"
+                elif not is_macro_safe:
+                    custom_5m_label = "⏳ 宏观利好支撑·5M暂停接空观望"
+                else:
+                    custom_5m_label = "⏳ 1H顺势看跌·5M下探观望(等待反弹)"
                 composite_5m = -0.05
         else:
             # -----------------------------------------------------------------
             # 1H 震荡观望 (NEUTRAL)：5M 严格执行拍卖市场箱体边缘高抛低吸
+            # 核心约束：箱体空间必须 >= 6.0 点，且宏观方向协同，否则坚决保持观望！
             # -----------------------------------------------------------------
+            has_box_up_space = (vah_5m - price >= 6.0) or (rhigh_5m - price >= 6.0)
+            has_box_down_space = (price - val_5m >= 6.0) or (price - rlow_5m >= 6.0)
+            box_width = max(vah_5m - val_5m, rhigh_5m - rlow_5m)
+
             if (price <= val_5m + 0.8) and (lower_wick_ratio >= 0.30 or exhaustion_penalty > 0.2 or s_cross_abs >= 0.35):
-                custom_5m_dir = "UP"
-                custom_5m_label = "1H震荡·5M箱体底部接多"
-                composite_5m = round(0.28 + 0.10 * s_cross_mom, 3)
-                is_5m_at_floor = True
+                if has_box_up_space and box_width >= 6.0 and s_macro > -0.25:
+                    custom_5m_dir = "UP"
+                    custom_5m_label = "1H震荡·5M箱体底部接多"
+                    composite_5m = round(0.28 + 0.10 * s_cross_mom, 3)
+                    is_5m_at_floor = True
+                else:
+                    custom_5m_dir = "NEUTRAL"
+                    custom_5m_label = "⏳ 5M箱体空间不足6点·保持观望" if (not has_box_up_space or box_width < 6.0) else "⏳ 宏观利空承压·5M箱底暂停接多"
+                    composite_5m = 0.0
             elif (price >= vah_5m - 0.8) and (upper_wick_ratio >= 0.30 or exhaustion_penalty < -0.2 or s_cross_abs <= -0.35):
-                custom_5m_dir = "DOWN"
-                custom_5m_label = "1H震荡·5M箱体顶部接空"
-                composite_5m = round(-0.28 + 0.10 * s_cross_mom, 3)
-                is_5m_at_ceiling = True
+                if has_box_down_space and box_width >= 6.0 and s_macro < 0.25:
+                    custom_5m_dir = "DOWN"
+                    custom_5m_label = "1H震荡·5M箱体顶部接空"
+                    composite_5m = round(-0.28 + 0.10 * s_cross_mom, 3)
+                    is_5m_at_ceiling = True
+                else:
+                    custom_5m_dir = "NEUTRAL"
+                    custom_5m_label = "⏳ 5M箱体空间不足6点·保持观望" if (not has_box_down_space or box_width < 6.0) else "⏳ 宏观利好支撑·5M箱顶暂停接空"
+                    composite_5m = 0.0
             else:
                 custom_5m_dir = "NEUTRAL"
                 custom_5m_label = "1H震荡·5M中轴观望"
                 composite_5m = 0.0
 
         hier_bias = composite_1h * 0.70 + composite_1d * 0.30
-        atr_5m_scaled = atr_5m * vol_mult * vol_target_mult_5m * gamma_elasticity
+        atr_5m_scaled = float(atr_5m * vol_mult * vol_target_mult_5m * float(gamma_elasticity))
 
         pred_5m = self._build_prediction_record(
             pred_id=f"pred_5m_{now_ts}_{uuid.uuid4().hex[:6]}",
@@ -722,14 +749,14 @@ class ETHPredictor:
             else:
                 dir_label = "宏观偏多" if direction == "UP" else "宏观偏空"
 
-        # 动态目标位置与结构失效线计算 (结合用户要求：5M>=8~10点, 1H>=30点, 1D>=60点)
-        min_space_req = weights.get("min_directional_space", 8.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
+        # 动态目标位置与结构失效线计算 (结合用户要求：5M>=6点, 1H>=30点, 1D>=60点)
+        min_space_req = weights.get("min_directional_space", 6.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
         cfg_min_tp1 = weights.get("min_tp1_dist", 6.0 if tf == "5m" else (18.0 if tf == "1h" else 35.0))
-        cfg_min_tp2 = weights.get("min_tp2_dist", 10.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
+        cfg_min_tp2 = weights.get("min_tp2_dist", 9.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0))
 
         min_tp1_dist = max(atr * k_tp1 * 0.70, cfg_min_tp1)
-        min_tp2_step = max(round(atr * 0.40, 2), 3.5 if tf == "5m" else (10.0 if tf == "1h" else 20.0))
-        min_sl_dist = max(round(atr * 0.50, 2), 3.0 if tf == "5m" else (10.0 if tf == "1h" else 22.0))
+        min_tp2_step = max(round(atr * 0.40, 2), 3.0 if tf == "5m" else (10.0 if tf == "1h" else 20.0))
+        min_sl_dist = max(round(atr * 0.50, 2), 4.5 if tf == "5m" else (10.0 if tf == "1h" else 22.0))
 
         vp = volume_profile or {}
         poc = safe_float(vp.get("poc"))
@@ -765,7 +792,6 @@ class ETHPredictor:
                     tp2 = round(tp2_atr, 2)
             tp2 = min(tp2, round(price + atr * (k_tp2 * 1.4), 2))
             tp2 = max(tp2, round(tp1 + min_tp2_step, 2))
-            tp2 = max(tp2, round(price + cfg_min_tp2, 2))
 
             # 结构失效线：底部接多紧贴支撑下沿防守，形成非对称高盈亏比
             support_floor = min(val, rlow) if (val > 0 and rlow > 0) else (price - min_sl_dist)
@@ -806,7 +832,6 @@ class ETHPredictor:
                     tp2 = round(tp2_atr, 2)
             tp2 = max(tp2, round(price - atr * (k_tp2 * 1.4), 2))
             tp2 = min(tp2, round(tp1 - min_tp2_step, 2))
-            tp2 = min(tp2, round(price - cfg_min_tp2, 2))
 
             # 结构失效线：顶部接空紧贴阻力上沿防守，形成非对称高盈亏比
             resist_ceiling = max(vah, rhigh) if (vah > 0 and rhigh > 0) else (price + min_sl_dist)
@@ -826,10 +851,16 @@ class ETHPredictor:
             target_range = "--"
             expected_change_pct = 0.0
 
-        # 空间门槛硬核核验 (5M>=8~10点, 1H>=30点, 1D>=60点)：
-        # 若潜在波段空间达不到空间门槛，坚决判定为 NEUTRAL 观望，杜绝低盈亏比鸡肋交易！
-        total_space = abs(tp2 - price) if direction in ("UP", "DOWN") else 0.0
-        if direction in ("UP", "DOWN") and total_space < min_space_req:
+        # 空间门槛硬核核验 (用户明确要求：5M判断行情上涨或下跌大于等于6才出单，不然保持观望！1H>=30, 1D>=60)：
+        # 若盘面真实波段空间（至 TP1 或 TP2）达不到空间门槛，坚决判定为 NEUTRAL 观望，绝不出单！
+        if direction == "UP":
+            avail_space = max(tp1 - price, tp2 - price)
+        elif direction == "DOWN":
+            avail_space = max(price - tp1, price - tp2)
+        else:
+            avail_space = 0.0
+
+        if direction in ("UP", "DOWN") and avail_space < min_space_req:
             direction = "NEUTRAL"
             dir_icon = "⏸️"
             dir_label = f"空间受限观望 (<{min_space_req:.0f}点)"
@@ -840,6 +871,14 @@ class ETHPredictor:
             target_range = "--"
             expected_change_pct = 0.0
             attribution_tags.append(f"空间受限(<{min_space_req:.0f}点)")
+        elif direction in ("UP", "DOWN"):
+            # 空间核验通过，确保 tp2 满足第二目标冲刺距离
+            if direction == "UP":
+                tp2 = max(tp2, round(price + cfg_min_tp2, 2))
+                target_range = f"{tp1:.2f} ~ {tp2:.2f}"
+            else:
+                tp2 = min(tp2, round(price - cfg_min_tp2, 2))
+                target_range = f"{tp2:.2f} ~ {tp1:.2f}"
 
         # 核心驱动因子归因标签与详细诊断
         attribution_detail = []

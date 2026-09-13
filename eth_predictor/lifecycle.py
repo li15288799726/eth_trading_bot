@@ -79,7 +79,15 @@ class PredictionLifecycleManager:
     def _save_active(self):
         """保存当前活跃目标状态"""
         try:
-            self.active_file.write_text(json.dumps(self.active_predictions, indent=2, ensure_ascii=False), encoding="utf-8")
+            def _json_default(obj):
+                if hasattr(obj, "item"):
+                    return obj.item()
+                if hasattr(obj, "__float__"):
+                    return float(obj)
+                if hasattr(obj, "__int__"):
+                    return int(obj)
+                return str(obj)
+            self.active_file.write_text(json.dumps(self.active_predictions, indent=2, ensure_ascii=False, default=_json_default), encoding="utf-8")
         except Exception as e:
             print(f"[!] 保存 active_predictions.json 异常: {e}", flush=True)
 
@@ -249,6 +257,24 @@ class PredictionLifecycleManager:
                 # 1H 处于顺势看空时，5M 严禁顺手开多，除非触发极高强度的超卖反弹 (score >= 0.32)
                 if score < 0.32:
                     return False
+
+        # 6. 空间门槛硬核校验 (用户明确要求：5M 预期空间 >= 6 点才出单，否则保持观望；1H>=30, 1D>=60)
+        if direction in ("UP", "DOWN"):
+            req_space = 6.0 if tf == "5m" else (30.0 if tf == "1h" else 60.0)
+            base_p = safe_float(raw_pred.get("base_price", 0.0))
+            tp1_p = safe_float(raw_pred.get("tp1", 0.0))
+            tp2_p = safe_float(raw_pred.get("tp2", 0.0))
+            max_space = max(abs(tp1_p - base_p), abs(tp2_p - base_p)) if base_p > 0 else 0.0
+            if max_space < (req_space - 0.05):
+                return False
+
+        # 7. 宏观对冲门禁 (防止开单 3 分钟即被宏观利空/利好核验偏离秒杀)
+        macro_events = market_snapshot.get("macro_events") or {}
+        s_macro = safe_float(macro_events.get("composite_event_score", 0.0))
+        if direction == "UP" and s_macro <= -0.25:
+            return False
+        if direction == "DOWN" and s_macro >= 0.25:
+            return False
 
         return True
 
@@ -576,13 +602,31 @@ class PredictionLifecycleManager:
                 elif is_deviated:
                     # 周期核验判定趋势严重偏离！立即终止预测，进入观望等待状态
                     had_tp1 = (act.get("tp1_status") == "REACHED")
-                    outcome = "TP1_WIN" if had_tp1 else "DEVIATION_STOP"
-                    is_win = True if had_tp1 else False
-                    acc_score = 0.85 if had_tp1 else 0.0
+                    dir_val = act.get("direction", "UP")
+                    base_px = act.get("base_price", current_price)
+                    pnl_now = round(((current_price - base_px) / base_px * 100.0), 3) if dir_val == "UP" else round(((base_px - current_price) / base_px * 100.0), 3)
+                    is_favorable = (pnl_now >= 0.08)
+
+                    if had_tp1:
+                        outcome = "TP1_WIN"
+                        is_win = True
+                        acc_score = 0.85
+                    elif is_favorable:
+                        outcome = "DEV_PROFIT_EXIT"
+                        is_win = True
+                        acc_score = 0.65
+                    else:
+                        outcome = "DEVIATION_STOP"
+                        is_win = False
+                        acc_score = 0.0
+
                     reason_text = (
                         f"🎯 目标 1 已达成，第 {chk_count} 次趋势核验判定动能偏离锁利离场: {dev_reason}"
-                        if had_tp1 else
-                        f"⚠️ 第 {chk_count} 次趋势核验判定严重偏离 (偏离度={dev_score:.2f} >= 0.55)，及时风控离场: {dev_reason}"
+                        if had_tp1 else (
+                            f"🛡️ 顺向浮盈({pnl_now:+.2f}%)，第 {chk_count} 次趋势核验判定动能减弱保利离场: {dev_reason}"
+                            if is_favorable else
+                            f"⚠️ 第 {chk_count} 次趋势核验判定严重偏离 (偏离度={dev_score:.2f} >= 0.55)，及时风控离场: {dev_reason}"
+                        )
                     )
                     print(f"[Lifecycle] ⚠️ [{tf}] 周期性趋势核验触发偏离终止！{reason_text}", flush=True)
                     self._finalize_prediction(
@@ -795,14 +839,22 @@ class PredictionLifecycleManager:
         vwap_data = market_snapshot.get("vwap_daily") or calc_daily_vwap(kl_5m)
 
         if price_loss <= 0:
-            pass
+            # 顺势浮盈状态下，盘口底噪偏离实施大幅折减保护
+            if tf == "1d":
+                dev_score = dev_score * 0.30
+            elif tf == "1h":
+                dev_score = dev_score * 0.50
+            elif tf == "5m":
+                dev_score = dev_score * 0.50
         elif price_loss <= normal_pullback_limit:
             reasons.append(f"顺势正常微幅回踩(-{price_loss:.2f}U在容忍度{normal_pullback_limit:.1f}U内)")
-            # 关键风控保护：当价格仅处于大周期正常回踩区间时，对微观指标的偏离打分实施平滑折减，彻底消除 1D/1H 因小时级正常回踩被误杀的致命缺陷
+            # 关键风控保护：当价格仅处于大周期正常回踩区间时，对微观指标的偏离打分实施平滑折减，彻底消除因微观正常回踩被误杀的致命缺陷
             if tf == "1d":
                 dev_score = dev_score * 0.40
             elif tf == "1h":
                 dev_score = dev_score * 0.70
+            elif tf == "5m":
+                dev_score = dev_score * 0.65
         elif price_loss < extreme_surge_limit:
             dev_score += 0.25
             reasons.append(f"回踩偏深(-{price_loss:.2f}U超出正常容忍度{normal_pullback_limit:.1f}U)")

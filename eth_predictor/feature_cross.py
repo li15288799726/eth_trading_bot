@@ -238,9 +238,9 @@ class FeatureCrossEngine:
         is_dry = (vol_z <= -0.8)
         
         if is_surge and abs(s_cross_momentum) >= 0.25:
-            gamma_elasticity = round(min(1.35, 1.0 + (vol_z - 1.0) * 0.15), 2)
+            gamma_elasticity = float(round(min(1.35, 1.0 + (float(vol_z) - 1.0) * 0.15), 2))
         elif is_dry or (abs(s_cross_momentum) < 0.1 and abs(s_cross_absorption) < 0.1):
-            gamma_elasticity = round(max(0.80, 0.90 + vol_z * 0.1), 2)
+            gamma_elasticity = float(round(max(0.80, 0.90 + float(vol_z) * 0.1), 2))
         else:
             gamma_elasticity = 1.0
 
@@ -262,12 +262,12 @@ class FeatureCrossEngine:
             summary = f"检测到顶部诱多出货陷阱 (吸收分={s_cross_absorption:+.2f})，买盘衰竭谨防高位反转"
 
         return {
-            "s_cross_momentum": s_cross_momentum,
-            "s_cross_absorption": s_cross_absorption,
-            "gamma_elasticity": gamma_elasticity,
+            "s_cross_momentum": float(s_cross_momentum),
+            "s_cross_absorption": float(s_cross_absorption),
+            "gamma_elasticity": float(gamma_elasticity),
             "cross_regime_tag": regime_tag,
             "interaction_summary": summary,
-            "feature_vector": x.tolist()
+            "feature_vector": [float(val) for val in x.tolist()]
         }
 
     def _evaluate_fallback_numpy(self, x):
