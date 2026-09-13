@@ -315,6 +315,253 @@ def calc_daily_vwap(klines_5m, tz_offset_hours=8, as_of_ms=None, price=None):
     }
 
 
+def calc_weekly_vwap(klines_1h, tz_offset_hours=8, as_of_ms=None, price=None):
+    """
+    计算北京时间周一 00:00 (UTC+8) 起算的真实周线 Weekly VWAP 及其标准差通道与斜率
+    覆盖整周周一至周日所有已闭合 K 线真实成交量，杜绝日内 VWAP 周末或开盘初期的标准差轨道失真。
+    """
+    if not klines_1h or len(klines_1h) < 3:
+        return None
+
+    from eth_predictor.asof import filter_closed_klines, now_ms
+    from datetime import datetime, timezone, timedelta
+
+    TZ_BJT = timezone(timedelta(hours=tz_offset_hours))
+    t_ms = now_ms(as_of_ms)
+    closed = filter_closed_klines(klines_1h, as_of_ms=t_ms, interval="1h")
+    if len(closed) < 3:
+        return None
+
+    now_bjt = datetime.fromtimestamp(t_ms / 1000.0, tz=TZ_BJT)
+    monday_bjt = datetime(now_bjt.year, now_bjt.month, now_bjt.day, tzinfo=TZ_BJT) - timedelta(days=now_bjt.weekday())
+    monday_start_ms = int(monday_bjt.timestamp() * 1000)
+
+    week_ks = [k for k in closed if safe_float(k[0]) >= monday_start_ms]
+    if len(week_ks) < 6:
+        week_ks = closed[-48:]
+
+    cum_vol = 0.0
+    cum_tp_vol = 0.0
+    kl_data = []
+    vwap_series = []
+
+    for k in week_ks:
+        h = safe_float(k[2])
+        l = safe_float(k[3])
+        c = safe_float(k[4])
+        v = safe_float(k[5])
+        tp = (h + l + c) / 3.0
+        cum_vol += v
+        cum_tp_vol += tp * v
+        cur_vwap = (cum_tp_vol / cum_vol) if cum_vol > 0 else c
+        vwap_series.append(cur_vwap)
+        kl_data.append((tp, v))
+
+    if cum_vol <= 0:
+        return None
+
+    vwap = round(cum_tp_vol / cum_vol, 2)
+    sum_sq = sum(v * ((tp - vwap) ** 2) for tp, v in kl_data)
+    sigma = math.sqrt(sum_sq / cum_vol)
+
+    current_price = safe_float(price) if price is not None else safe_float(week_ks[-1][4])
+    if current_price <= 0:
+        current_price = safe_float(week_ks[-1][4])
+    z_score = round((current_price - vwap) / sigma, 3) if sigma > 0 else 0.0
+
+    slope = 0.0
+    if len(vwap_series) >= 4:
+        slope = round(vwap_series[-1] - vwap_series[-4], 2)
+
+    u1 = round(vwap + sigma, 2)
+    l1 = round(vwap - sigma, 2)
+    u2 = round(vwap + 2 * sigma, 2)
+    l2 = round(vwap - 2 * sigma, 2)
+    u3 = round(vwap + 3 * sigma, 2)
+    l3 = round(vwap - 3 * sigma, 2)
+
+    return {
+        "vwap": vwap,
+        "sigma": round(sigma, 2),
+        "z_score": z_score,
+        "slope": slope,
+        "u1": u1, "l1": l1,
+        "u2": u2, "l2": l2,
+        "u3": u3, "l3": l3,
+        "mid_upper": round((u1 + u2) / 2.0, 2),
+        "mid_lower": round((l1 + l2) / 2.0, 2),
+        "n_candles": len(week_ks),
+        "price": current_price,
+        "as_of_ms": t_ms,
+    }
+
+
+def calc_candlestick_morphology(klines, bar_index=-1):
+    """
+    计算单根 K 线的实体比、影线比及 Pin Bar / 大实体破位形态
+    """
+    if not klines or abs(bar_index) > len(klines):
+        return {
+            "body_pct": 50.0, "lower_shadow_pct": 25.0, "upper_shadow_pct": 25.0,
+            "is_bear": False, "is_bull": False,
+            "is_marubozu_bear": False, "is_marubozu_bull": False,
+            "is_pinbar_bottom": False, "is_pinbar_top": False,
+        }
+
+    k = klines[bar_index]
+    o = safe_float(k[1])
+    h = safe_float(k[2])
+    l = safe_float(k[3])
+    c = safe_float(k[4])
+    v = safe_float(k[5])
+
+    tot_range = max(h - l, 0.01)
+    body = abs(c - o)
+    lower_shadow = max(min(o, c) - l, 0.0)
+    upper_shadow = max(h - max(o, c), 0.0)
+
+    body_pct = round(body / tot_range * 100.0, 1)
+    lower_shadow_pct = round(lower_shadow / tot_range * 100.0, 1)
+    upper_shadow_pct = round(upper_shadow / tot_range * 100.0, 1)
+
+    is_bear = (c < o)
+    is_bull = (c > o)
+
+    # 实体大阴线 / 大阳线 (实体 >= 65%, 影线 <= 22%)
+    is_marubozu_bear = (is_bear and body_pct >= 65.0 and lower_shadow_pct <= 22.0)
+    is_marubozu_bull = (is_bull and body_pct >= 65.0 and upper_shadow_pct <= 22.0)
+
+    # 15M 长影线衰竭 Pin Bar (影线 >= 50%, 实体 <= 35%)
+    is_pinbar_bottom = (lower_shadow_pct >= 50.0 and body_pct <= 35.0)
+    is_pinbar_top = (upper_shadow_pct >= 50.0 and body_pct <= 35.0)
+
+    return {
+        "open": o, "high": h, "low": l, "close": c, "vol": v,
+        "tot_range": round(tot_range, 2),
+        "body": round(body, 2),
+        "body_pct": body_pct,
+        "lower_shadow_pct": lower_shadow_pct,
+        "upper_shadow_pct": upper_shadow_pct,
+        "is_bear": is_bear,
+        "is_bull": is_bull,
+        "is_marubozu_bear": is_marubozu_bear,
+        "is_marubozu_bull": is_marubozu_bull,
+        "is_pinbar_bottom": is_pinbar_bottom,
+        "is_pinbar_top": is_pinbar_top,
+    }
+
+
+def calc_momentum_exhaustion(klines_5m, klines_1h, vol_oi, direction="DOWN"):
+    """
+    盘口动能衰竭与多头/空头出清力竭核验：
+    1. 15M / 5M 出现长影线反抽 (影线 >= 50%)
+    2. 持仓量 (OI) 发生大规模断崖式下降 (多头爆仓/空头去杠杆出清完毕，无新卖/买盘)
+    3. 成交量较急跌/急涨峰值大幅收缩 (萎缩至 35% 以下)
+    4. K 线进入小幅窄幅震荡 (<= 7.5U 振幅) 停滞不前
+    """
+    reasons = []
+    vol_oi = vol_oi or {}
+
+    # 1. 影线核验
+    morph_5m = calc_candlestick_morphology(klines_5m, -1)
+    morph_prev_5m = calc_candlestick_morphology(klines_5m, -2) if len(klines_5m or []) >= 2 else morph_5m
+
+    pinbar_detected = False
+    if direction == "DOWN":
+        if morph_5m["is_pinbar_bottom"] or morph_prev_5m["is_pinbar_bottom"]:
+            pinbar_detected = True
+            reasons.append(f"收出长下影线({morph_5m['lower_shadow_pct']}%)")
+    elif direction == "UP":
+        if morph_5m["is_pinbar_top"] or morph_prev_5m["is_pinbar_top"]:
+            pinbar_detected = True
+            reasons.append(f"收出长上影线({morph_5m['upper_shadow_pct']}%)")
+
+    # 2. 持仓量出清核验 (出清意味着燃料耗尽)
+    oi_delta_1h = safe_float(vol_oi.get("oi_delta_1h", 0.0))
+    oi_flushed = False
+    if direction == "DOWN" and oi_delta_1h <= -2500:
+        oi_flushed = True
+        reasons.append(f"多头爆仓出清完毕(1H OI降幅 {oi_delta_1h:+.0f} ETH)")
+    elif direction == "UP" and oi_delta_1h <= -2500:
+        oi_flushed = True
+        reasons.append(f"空头挤压出清完毕(1H OI降幅 {oi_delta_1h:+.0f} ETH)")
+
+    # 3. 成交量萎缩核验 (近 3 根对比过去 24 根峰值)
+    vol_contracted = False
+    if klines_5m and len(klines_5m) >= 12:
+        recent_vols = [safe_float(k[5]) for k in klines_5m[-3:]]
+        avg_recent_vol = sum(recent_vols) / len(recent_vols)
+        past_vols = [safe_float(k[5]) for k in klines_5m[-24:]]
+        max_past_vol = max(past_vols) if past_vols else 1.0
+        if max_past_vol > 0 and (avg_recent_vol / max_past_vol) <= 0.35:
+            vol_contracted = True
+            reasons.append(f"成交量断崖式萎缩(仅峰值 {(avg_recent_vol/max_past_vol*100):.0f}%)")
+
+    # 4. 小幅箱体横盘停滞 (近 4 根 5M 极差 <= 7.5U)
+    tight_consolidation = False
+    if klines_5m and len(klines_5m) >= 4:
+        recent_highs = [safe_float(k[2]) for k in klines_5m[-4:]]
+        recent_lows = [safe_float(k[3]) for k in klines_5m[-4:]]
+        range_span = max(recent_highs) - min(recent_lows)
+        if range_span <= 7.5:
+            tight_consolidation = True
+            reasons.append(f"K线进入窄幅收敛整理(振幅仅 {range_span:.1f}U)")
+
+    # 综合判定：长影线直接判衰竭；或者 (OI出清 + 缩量 + 窄幅横盘) 判衰竭
+    is_exhausted = pinbar_detected or (oi_flushed and vol_contracted and tight_consolidation) or (pinbar_detected and tight_consolidation)
+
+    return {
+        "is_exhausted": is_exhausted,
+        "pinbar_detected": pinbar_detected,
+        "oi_flushed": oi_flushed,
+        "vol_contracted": vol_contracted,
+        "tight_consolidation": tight_consolidation,
+        "reasons": reasons,
+        "morph_5m": morph_5m,
+    }
+
+
+def calc_breakout_acceleration(klines_5m, klines_1h, vol_oi, macro_events, direction="DOWN"):
+    """
+    判定突破清算区后是否处于“趋势刚刚启动，加速下探/上攻”形态：
+    1. K 线呈现大实体 (实体比 >= 60%, 影线 <= 25%)
+    2. 宏观面 (ETF/政策) 无逆向冲突
+    """
+    reasons = []
+    morph_5m = calc_candlestick_morphology(klines_5m, -1)
+    morph_prev_5m = calc_candlestick_morphology(klines_5m, -2) if len(klines_5m or []) >= 2 else morph_5m
+
+    is_candle_strong = False
+    if direction == "DOWN":
+        if morph_5m["is_marubozu_bear"] or morph_prev_5m["is_marubozu_bear"] or (morph_5m["is_bear"] and morph_5m["body_pct"] >= 60.0 and morph_5m["lower_shadow_pct"] <= 25.0):
+            is_candle_strong = True
+            reasons.append(f"实体大阴线放量破位(实体 {morph_5m['body_pct']}%, 下影 {morph_5m['lower_shadow_pct']}%)")
+    elif direction == "UP":
+        if morph_5m["is_marubozu_bull"] or morph_prev_5m["is_marubozu_bull"] or (morph_5m["is_bull"] and morph_5m["body_pct"] >= 60.0 and morph_5m["upper_shadow_pct"] <= 25.0):
+            is_candle_strong = True
+            reasons.append(f"实体大阳线放量上攻(实体 {morph_5m['body_pct']}%, 上影 {morph_5m['upper_shadow_pct']}%)")
+
+    macro_ok = True
+    macro_events = macro_events or {}
+    s_macro = safe_float(macro_events.get("composite_event_score", 0.0))
+    if direction == "DOWN" and s_macro <= 0.15:
+        reasons.append(f"宏观偏空格局共振(评分 {s_macro:+.2f})")
+    elif direction == "UP" and s_macro >= -0.15:
+        reasons.append(f"宏观偏多格局共振(评分 {s_macro:+.2f})")
+    elif (direction == "DOWN" and s_macro > 0.35) or (direction == "UP" and s_macro < -0.35):
+        macro_ok = False
+
+    is_accelerating = is_candle_strong and macro_ok
+
+    return {
+        "is_accelerating": is_accelerating,
+        "is_candle_strong": is_candle_strong,
+        "macro_ok": macro_ok,
+        "reasons": reasons,
+        "morph_5m": morph_5m,
+    }
+
+
 def calc_atr(klines, period=14):
     """计算真实波幅均值 (Average True Range)"""
     if not klines or len(klines) < 2:

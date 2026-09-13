@@ -706,7 +706,10 @@ class Engine:
               flush=True)
 
     def get_vwap_bands(self):
-        """优先使用币安日内实时自算 Daily VWAP (北京 00:00 归零); 缺失时回退到 CoinGlass"""
+        """优先使用币安周线实时自算 Weekly VWAP (北京周一 00:00 归零); 缺失时回退到日内或 CoinGlass"""
+        weekly = getattr(self.futures_feed, "calc_weekly_vwap", lambda: None)()
+        if weekly and weekly.get("vwap"):
+            return weekly
         daily = self.futures_feed.calc_daily_vwap()
         if daily and daily.get("vwap"):
             return daily
@@ -800,6 +803,8 @@ class Engine:
 
     def state(self):
         vwap_view = self.get_vwap_bands()
+        weekly_vwap = getattr(self.futures_feed, "calc_weekly_vwap", lambda: None)()
+        daily_vwap = getattr(self.futures_feed, "calc_daily_vwap", lambda: None)()
         price = self.futures_feed.price
         ks = []
         for k in self.futures_feed.klines[-MAX_KLINES_CHART:]:
@@ -828,6 +833,8 @@ class Engine:
                        "no_fetch": self.args.no_fetch},
             "fetching": self._fetching,
             "vwap": vwap_view,
+            "vwap_weekly": weekly_vwap,
+            "vwap_daily": daily_vwap,
             "volume_oi": vol_oi_snap,
             "klines": ks,
             "liq": self.liq,
@@ -918,7 +925,8 @@ def build_app(engine):
                 if live_act and live_act.get("pred_id") == p.get("pred_id"):
                     for k in ["stage", "stage_step", "stage_label", "tp1_status", "tp2_status",
                               "tp1_hit_ts", "tp1_hit_price", "secondary_eval", "highest_seen",
-                              "lowest_seen", "exit_info", "sl_breached", "timeout_ts", "timeout_iso", "timeout_candles"]:
+                              "lowest_seen", "exit_info", "sl_breached", "timeout_ts", "timeout_iso", "timeout_candles",
+                              "roll_count", "tp_tolerance", "extended_targets", "original_tp2"]:
                         if k in live_act:
                             p[k] = live_act[k]
 

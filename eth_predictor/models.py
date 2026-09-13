@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 
 from eth_predictor.indicators import (
-    calc_daily_vwap, calc_atr, calc_rsi, calc_bollinger_bands,
+    calc_daily_vwap, calc_weekly_vwap, calc_atr, calc_rsi, calc_bollinger_bands,
     calc_ema_ribbon, calc_cvd, calc_pivot_levels,
     calc_oi_matrix, calc_positioning_sentiment, calc_liquidation_gravity,
     calc_volume_profile, safe_float,
@@ -136,8 +136,9 @@ class ETHPredictor:
         if liq_raw.get("_liq_disabled") or not isinstance(liq_raw.get("data"), list):
             liq_raw = {}
 
-        # 1. 基础指标计算 (VWAP: day 00:00 -> T, closed bars only)
+        # 1. 基础指标计算 (VWAP: day 00:00 -> T, closed bars only; Weekly: Mon 00:00 -> T)
         vwap_daily = market_snapshot.get("vwap_daily") or calc_daily_vwap(kl_5m, as_of_ms=t_ms, price=price)
+        vwap_weekly = market_snapshot.get("vwap_weekly") or calc_weekly_vwap(kl_1h, as_of_ms=t_ms, price=price)
         atr_5m = calc_atr(kl_5m, 14)
         atr_1h = calc_atr(kl_1h, 14) if kl_1h else max(10.0, atr_5m * 2.5)
         atr_1d = calc_atr(kl_1d, 14) if kl_1d else max(40.0, atr_1h * 3.5)
@@ -333,7 +334,8 @@ class ETHPredictor:
             realtime_liquidations=rt_liq,
             volume_profile=vp_1h,
             is_ceiling_short=is_1d_at_ceiling,
-            is_floor_long=is_1d_at_floor
+            is_floor_long=is_1d_at_floor,
+            vwap_weekly=vwap_weekly
         )
         results["1d"] = pred_1d
 
@@ -458,7 +460,8 @@ class ETHPredictor:
             realtime_liquidations=rt_liq,
             volume_profile=vp_1h,
             is_ceiling_short=is_1h_at_ceiling,
-            is_floor_long=is_1h_at_floor
+            is_floor_long=is_1h_at_floor,
+            vwap_weekly=vwap_weekly
         )
         results["1h"] = pred_1h
 
@@ -740,7 +743,8 @@ class ETHPredictor:
             is_floor_long=is_5m_at_floor,
             custom_dir_label=custom_5m_label,
             custom_direction=custom_5m_dir,
-            feature_cross=cross_res
+            feature_cross=cross_res,
+            vwap_weekly=vwap_weekly
         )
         results["5m"] = pred_5m
         results["feature_cross"] = cross_res
@@ -754,7 +758,7 @@ class ETHPredictor:
                                  btc_lead_lag=None, realtime_liquidations=None, volume_profile=None,
                                  is_ceiling_short=False, is_floor_long=False,
                                  custom_dir_label=None, custom_direction=None,
-                                 feature_cross=None):
+                                 feature_cross=None, vwap_weekly=None):
         """生成单周期实时预测记录，含方向、预期目标带、结构失效线、置信度、驱动归因及多情景概率树"""
         thresh = weights.get("neutral_thresh", 0.08)
         k_tp1 = weights.get("atr_tp1_mult", 0.45)
@@ -849,12 +853,28 @@ class ETHPredictor:
         rhigh = safe_float(vp.get("range_high"))
         rlow = safe_float(vp.get("range_low"))
 
+        vw_data = vwap_weekly or {}
+        vw_vwap = safe_float(vw_data.get("vwap"))
+        vw_u1 = safe_float(vw_data.get("u1"))
+        vw_u2 = safe_float(vw_data.get("u2"))
+        vw_u3 = safe_float(vw_data.get("u3"))
+        vw_l1 = safe_float(vw_data.get("l1"))
+        vw_l2 = safe_float(vw_data.get("l2"))
+        vw_l3 = safe_float(vw_data.get("l3"))
+
+        extended_targets = []
+        # 前置容差带：进入该缓冲带即触发动能检视，不必精准打点
+        tp_tolerance = 4.0 if tf == "5m" else (8.0 if tf == "1h" else 20.0)
+
         if direction == "UP":
             tp1_atr = price + atr * k_tp1
             # 底部接多核心锚定：若筹码核心 POC 位于现价上方且距离达标，POC 为极高概率均值回归第一目标
             if poc > 0 and poc >= price + min_tp1_dist:
                 tp1 = round(poc, 2)
                 attribution_tags.append("POC价值中枢锚定")
+            elif vw_vwap > 0 and (price + min_tp1_dist) <= vw_vwap <= (price + atr * 2.0):
+                tp1 = round(vw_vwap, 2)
+                attribution_tags.append("周线VWAP中枢锚定")
             else:
                 tp_up_liq = liq_gravity.get("primary_tp_up")
                 if tp_up_liq and (price + min_tp1_dist * 0.8) < tp_up_liq <= (price + atr * 1.5):
@@ -867,6 +887,9 @@ class ETHPredictor:
             if vah > 0 and vah >= tp1 + min_tp2_step:
                 tp2 = round(vah, 2)
                 attribution_tags.append("VAH价值区顶锚定")
+            elif vw_u1 > 0 and vw_u1 >= tp1 + min_tp2_step:
+                tp2 = round(vw_u1, 2)
+                attribution_tags.append("周线VWAP+1σ锚定")
             else:
                 tp2_liq = liq_gravity.get("secondary_tp_up")
                 max_tp2_reach = price + atr * (k_tp2 + 0.6)
@@ -876,6 +899,18 @@ class ETHPredictor:
                     tp2 = round(tp2_atr, 2)
             tp2 = min(tp2, round(price + atr * (k_tp2 * 1.4), 2))
             tp2 = max(tp2, round(tp1 + min_tp2_step, 2))
+
+            # 构建多级动态延展目标链 (Extended Targets)
+            cand_up = [tp1, tp2]
+            for lvl in [vw_vwap, vw_u1, vw_u2, vw_u3, liq_gravity.get("secondary_tp_up")]:
+                if lvl and lvl > price + min_tp1_dist:
+                    cand_up.append(round(lvl, 2))
+            cand_up = sorted(list(set(cand_up)))
+            ext_up = []
+            for t in cand_up:
+                if not ext_up or (t - ext_up[-1]) >= min_tp2_step:
+                    ext_up.append(t)
+            extended_targets = ext_up[:5]
 
             # 结构失效线：底部接多紧贴支撑下沿防守，形成非对称高盈亏比
             support_floor = min(val, rlow) if (val > 0 and rlow > 0) else (price - min_sl_dist)
@@ -895,6 +930,9 @@ class ETHPredictor:
             if poc > 0 and poc <= price - min_tp1_dist:
                 tp1 = round(poc, 2)
                 attribution_tags.append("POC价值中枢锚定")
+            elif vw_vwap > 0 and (price - min_tp1_dist) >= vw_vwap >= (price - atr * 2.0):
+                tp1 = round(vw_vwap, 2)
+                attribution_tags.append("周线VWAP中枢锚定")
             else:
                 tp_down_liq = liq_gravity.get("primary_tp_down")
                 if tp_down_liq and (price - min_tp1_dist * 0.8) > tp_down_liq >= (price - atr * 1.5):
@@ -907,6 +945,9 @@ class ETHPredictor:
             if val > 0 and val <= tp1 - min_tp2_step:
                 tp2 = round(val, 2)
                 attribution_tags.append("VAL价值区底锚定")
+            elif vw_l1 > 0 and vw_l1 <= tp1 - min_tp2_step:
+                tp2 = round(vw_l1, 2)
+                attribution_tags.append("周线VWAP-1σ锚定")
             else:
                 tp2_liq = liq_gravity.get("secondary_tp_down")
                 min_tp2_reach = price - atr * (k_tp2 + 0.6)
@@ -916,6 +957,18 @@ class ETHPredictor:
                     tp2 = round(tp2_atr, 2)
             tp2 = max(tp2, round(price - atr * (k_tp2 * 1.4), 2))
             tp2 = min(tp2, round(tp1 - min_tp2_step, 2))
+
+            # 构建多级动态延展目标链 (Extended Targets)
+            cand_down = [tp1, tp2]
+            for lvl in [vw_vwap, vw_l1, vw_l2, vw_l3, liq_gravity.get("secondary_tp_down")]:
+                if lvl and 0 < lvl < price - min_tp1_dist:
+                    cand_down.append(round(lvl, 2))
+            cand_down = sorted(list(set(cand_down)), reverse=True)
+            ext_down = []
+            for t in cand_down:
+                if not ext_down or (ext_down[-1] - t) >= min_tp2_step:
+                    ext_down.append(t)
+            extended_targets = ext_down[:5]
 
             # 结构失效线：顶部接空紧贴阻力上沿防守，形成非对称高盈亏比
             resist_ceiling = max(vah, rhigh) if (vah > 0 and rhigh > 0) else (price + min_sl_dist)
@@ -983,6 +1036,12 @@ class ETHPredictor:
             ev_summary = macro_events.get("summary")
             if ev_summary:
                 attribution_detail.append(ev_summary)
+
+        if vwap_weekly:
+            zw = vwap_weekly.get("z_score", 0.0)
+            if abs(zw) > 1.2:
+                attribution_tags.append(f"周VWAP偏离{zw:+.1f}σ")
+                attribution_detail.append(f"价格偏离周线VWAP达 {zw:+.1f} 倍标准差，存在回归周线均值需求")
 
         if vwap_daily:
             z = vwap_daily.get("z_score", 0.0)
@@ -1099,6 +1158,9 @@ class ETHPredictor:
             "pos_info": pos_info,
             "liq_gravity": liq_gravity,
             "vwap_daily": vwap_daily,
+            "vwap_weekly": vwap_weekly,
+            "tp_tolerance": tp_tolerance,
+            "extended_targets": extended_targets,
             "volume_profile": vp,
             "feature_cross": feature_cross
         }

@@ -110,6 +110,7 @@
   .tf-stage-banner{padding:8px 12px;border-radius:8px;font-size:11px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:7px;border:1px solid rgba(255,255,255,.08);transition:all .3s}
   .tf-stage-banner.stage-tp1{background:rgba(79,140,255,.12);border-color:rgba(79,140,255,.3);color:var(--accent)}
   .tf-stage-banner.stage-tp2{background:rgba(38,166,154,.15);border-color:rgba(38,166,154,.4);color:var(--up);box-shadow:0 0 10px rgba(38,166,154,.15)}
+  .tf-stage-banner.stage-roll{background:rgba(171,71,188,.18);border-color:rgba(186,104,200,.5);color:#e1bee7;box-shadow:0 0 12px rgba(171,71,188,.25)}
   .tf-stage-banner.stage-waiting{background:rgba(212,169,78,.12);border-color:rgba(212,169,78,.35);color:var(--gold)}
   .tf-stage-banner.stage-warn{background:rgba(239,83,80,.12);border-color:rgba(239,83,80,.3);color:var(--down)}
 
@@ -1216,6 +1217,9 @@ function renderPredictionCard(tf, pData, curPrice, tfMetrics, optAcc) {
     if (stage === "WAITING_SETUP") {
       stageBannerEl.className = "tf-stage-banner stage-waiting";
       stageTextEl.innerHTML = pData.stage_label || "⏸️ 观望中，等待下一个明确开仓时机";
+    } else if (stage === "STAGE_ROLL") {
+      stageBannerEl.className = "tf-stage-banner stage-roll";
+      stageTextEl.innerHTML = pData.stage_label || `🚀 <b>破位加速中！</b> 目标顺势延展至: <b>${pData.tp2 ? pData.tp2.toFixed(1) : '--'}</b> (第 ${pData.roll_count || 1} 轮)`;
     } else if (stage === "STAGE_TP2") {
       stageBannerEl.className = "tf-stage-banner stage-tp2";
       stageTextEl.innerHTML = `🎉 <b>目标 1 达成！</b> 动能延续，冲刺目标 2: <b>${pData.tp2 ? pData.tp2.toFixed(1) : '--'}</b>`;
@@ -1244,6 +1248,7 @@ function renderPredictionCard(tf, pData, curPrice, tfMetrics, optAcc) {
   const pipeTp2Tag = document.getElementById(`pipeTp2Tag_${tf}`);
   if (pipeTp2Tag) {
     if (stage === "WAITING_SETUP") pipeTp2Tag.innerText = "待激活";
+    else if (stage === "STAGE_ROLL") pipeTp2Tag.innerText = `🚀延展第${pData.roll_count || 1}轮`;
     else if (pData.tp2_status === "REACHED") pipeTp2Tag.innerText = "🎉双达标";
     else if (pData.tp2_status === "FAILED") pipeTp2Tag.innerText = "❌未达成";
     else if (stage === "STAGE_TP2") pipeTp2Tag.innerText = "🚀冲刺中";

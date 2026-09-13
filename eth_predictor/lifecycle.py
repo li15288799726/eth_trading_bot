@@ -23,7 +23,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from eth_predictor.indicators import (
-    calc_daily_vwap, calc_cvd, calc_oi_matrix, calc_liquidation_gravity, safe_float
+    calc_daily_vwap, calc_cvd, calc_oi_matrix, calc_liquidation_gravity, safe_float,
+    calc_candlestick_morphology, calc_momentum_exhaustion, calc_breakout_acceleration
 )
 
 TZ_BJT = timezone(timedelta(hours=8))
@@ -378,6 +379,10 @@ class PredictionLifecycleManager:
             "lowest_seen": current_price,
             "secondary_eval": None,
             "exit_info": None,
+            "roll_count": 0,
+            "tp_tolerance": raw_pred.get("tp_tolerance", 4.0 if tf == "5m" else (8.0 if tf == "1h" else 20.0)),
+            "extended_targets": list(raw_pred.get("extended_targets", [])),
+            "original_tp2": raw_pred.get("tp2", 0.0),
             "status": "ACTIVE",
         })
         self.active_predictions[tf] = active_obj
@@ -488,26 +493,94 @@ class PredictionLifecycleManager:
                 act["sl_breached"] = True
 
             # -------------------------------------------------------------
-            # 4. 纯事件驱动结算与周期性趋势动态核验
+            # 4. 纯事件驱动结算与趋势动能生命周期状态机 (延展 / 衰竭 / 翻转)
             # -------------------------------------------------------------
-            # 事件 A: 双目标均圆满打满 -> 提前锁定全周期大胜
-            if act.get("tp1_status") == "REACHED" and act.get("tp2_status") == "REACHED":
-                self._finalize_prediction(
-                    tf=tf,
-                    act=act,
-                    current_price=current_price,
-                    outcome="FULL_WIN",
-                    is_win=True,
-                    tp1_hit=True,
-                    tp2_hit=True,
-                    sl_hit=act.get("sl_breached", False),
-                    accuracy_score=1.0,
-                    reason=f"🎉 目标 1 ({tp1:.2f}) 与目标 2 ({tp2:.2f}) 双达标，全周期大胜！",
-                    market_snapshot=market_snapshot
-                )
-                continue
+            tp_tol = act.get("tp_tolerance", 4.0 if tf == "5m" else (8.0 if tf == "1h" else 20.0))
+            is_in_target_zone = (check_high >= tp2 - tp_tol) if direction == "UP" else (check_low <= tp2 + tp_tol if direction == "DOWN" else False)
 
-            # 事件 A2: 保本止盈保护触发 (打满目标 1 后，价格回踩至开仓保本线，锁定胜局退出，严禁由赢转亏)
+            if is_in_target_zone or act.get("tp2_status") == "REACHED":
+                # 进入目标核心容差带或已触碰 TP2：触发盘口动能形态与量仓衰竭核验
+                vol_oi_data = market_snapshot.get("volume_oi") or {}
+                macro_ev = market_snapshot.get("macro_events") or {}
+                kl_5m_chk = market_snapshot.get("klines_5m_raw") or market_snapshot.get("klines_5m") or current_klines_5m or []
+                kl_1h_chk = market_snapshot.get("klines_1h_raw") or market_snapshot.get("klines_1h") or []
+
+                accel_info = calc_breakout_acceleration(kl_5m_chk, kl_1h_chk, vol_oi_data, macro_ev, direction=direction)
+                exhaust_info = calc_momentum_exhaustion(kl_5m_chk, kl_1h_chk, vol_oi_data, direction=direction)
+
+                # 分支 A: 突破加速顺势延展 (Breakout Roll Target)
+                # 当 5M/15M 表现为大实体大阴/大阳破位且无反向长影线，宏观未逆转，顺势向下一级周线轨位或清算区延展
+                if accel_info.get("is_accelerating") and not exhaust_info.get("is_exhausted"):
+                    ext_targets = act.get("extended_targets") or []
+                    next_tp = None
+                    if direction == "DOWN":
+                        candidates = [t for t in ext_targets if t < tp2 - 1.5]
+                        if candidates:
+                            next_tp = candidates[0]
+                        else:
+                            step = max(6.0, act.get("atr", 4.0) * 1.5)
+                            next_tp = round(tp2 - step, 2)
+                    else: # UP
+                        candidates = [t for t in ext_targets if t > tp2 + 1.5]
+                        if candidates:
+                            next_tp = candidates[0]
+                        else:
+                            step = max(6.0, act.get("atr", 4.0) * 1.5)
+                            next_tp = round(tp2 + step, 2)
+
+                    old_tp2 = tp2
+                    act["tp2"] = next_tp
+                    roll_cnt = act.get("roll_count", 0) + 1
+                    act["roll_count"] = roll_cnt
+                    act["stage"] = "STAGE_ROLL"
+                    act["tp1_status"] = "REACHED"
+                    act["tp2_status"] = "PENDING"
+                    # 防守线平移保利 (空单下移防守，多单上移防守)
+                    if direction == "DOWN":
+                        act["sl"] = min(act.get("sl", base_px), round((base_px + old_tp2) / 2.0, 2))
+                    else:
+                        act["sl"] = max(act.get("sl", base_px), round((base_px + old_tp2) / 2.0, 2))
+
+                    act["target_range"] = f"{next_tp:.2f} ~ {tp1:.2f}" if direction == "DOWN" else f"{tp1:.2f} ~ {next_tp:.2f}"
+                    act["stage_label"] = f"🚀 破位加速中 · 目标顺势延展至 {next_tp:.2f} (第{roll_cnt}轮)"
+                    print(f"[Lifecycle] 🚀 [{tf}] 突破加速！目标顺势延展 {old_tp2:.2f} -> {next_tp:.2f} (第{roll_cnt}轮) | 理由: {'; '.join(accel_info.get('reasons', []))}", flush=True)
+
+                # 分支 B: 动能衰竭收割结案 (Exhaustion Finalize)
+                # 当出现长影线 Pin Bar 或 OI 暴降出清 + 缩量横盘整理，锁定利润落袋结案
+                elif exhaust_info.get("is_exhausted") and act.get("tp1_status") == "REACHED":
+                    self._finalize_prediction(
+                        tf=tf,
+                        act=act,
+                        current_price=current_price,
+                        outcome="EXHAUSTION_WIN",
+                        is_win=True,
+                        tp1_hit=True,
+                        tp2_hit=(act.get("tp2_status") == "REACHED"),
+                        sl_hit=act.get("sl_breached", False),
+                        accuracy_score=1.0,
+                        reason=f"🏁 动能衰竭收割 · 利润锁定结案: {'; '.join(exhaust_info.get('reasons', []))}",
+                        market_snapshot=market_snapshot
+                    )
+                    continue
+
+                # 兜底：若已触达目标 2 且既不继续加速也不衰竭（平稳停留满 60s），正常落袋大胜
+                elif act.get("tp2_status") == "REACHED" and (now_ts - act.get("tp2_hit_ts", now_ts)) >= 60:
+                    self._finalize_prediction(
+                        tf=tf,
+                        act=act,
+                        current_price=current_price,
+                        outcome="FULL_WIN",
+                        is_win=True,
+                        tp1_hit=True,
+                        tp2_hit=True,
+                        sl_hit=act.get("sl_breached", False),
+                        accuracy_score=1.0,
+                        reason=f"🎉 目标 1 ({tp1:.2f}) 与目标 2 ({tp2:.2f}) 顺势打满，圆满大胜收官！",
+                        market_snapshot=market_snapshot
+                    )
+                    continue
+
+            # 事件 A2: 保本止盈保护触发 (打满目标 1 后，价格回踩至开仓保本线或锁定防守线，锁定胜局退出，严禁由赢转亏)
             if act.get("tp1_status") == "REACHED" and act.get("trailing_be"):
                 is_be_hit = (current_price <= act["sl"]) if direction == "UP" else (current_price >= act["sl"])
                 if is_be_hit:
@@ -521,7 +594,7 @@ class PredictionLifecycleManager:
                         tp2_hit=False,
                         sl_hit=False,
                         accuracy_score=0.85,
-                        reason=f"🎯 目标 1 ({tp1:.2f}) 达成后价格回踩保本线 ({act['sl']:.2f})，保本保护触发，锁定利润胜局！",
+                        reason=f"🎯 目标 1 ({tp1:.2f}) 达成后价格回踩防守线 ({act['sl']:.2f})，保本保护触发，锁定利润胜局！",
                         market_snapshot=market_snapshot
                     )
                     continue

@@ -784,9 +784,9 @@ class BinanceFuturesFeed:
         if not force and now - getattr(self, "last_htf_update", 0.0) < 60.0:
             return
         try:
-            # 1H K线拉取 100 根 (充足覆盖 EMA55 彩带与 RSI/ATR)
+            # 1H K线拉取 240 根 (充足覆盖整周周线 VWAP 与多周期指标计算)
             ks_1h = self._request("/fapi/v1/klines", {
-                "symbol": self.symbol, "interval": "1h", "limit": 100
+                "symbol": self.symbol, "interval": "1h", "limit": 240
             }, timeout=5)
             if ks_1h and isinstance(ks_1h, list) and len(ks_1h) >= 55:
                 self.klines_1h = ks_1h
@@ -801,6 +801,82 @@ class BinanceFuturesFeed:
             self.last_htf_update = now
         except Exception:
             pass
+
+    def calc_weekly_vwap(self, as_of_ms=None):
+        """
+        计算本周北京时间周一 00:00 (UTC+8) 至 as_of T 的周线真实 Weekly VWAP 及 ±1σ/±2σ/±3σ 轨道
+        覆盖整周从周一到周日所有真实成交量，杜绝日内 VWAP 周末或开盘初期的标准差轨道失真。
+        """
+        closed_1h = self.get_closed_klines("1h", as_of_ms=as_of_ms)
+        t_ms = int(as_of_ms) if as_of_ms is not None else int(time.time() * 1000)
+        now_bjt = datetime.fromtimestamp(t_ms / 1000.0, tz=TZ_BJT)
+        monday_bjt = datetime(now_bjt.year, now_bjt.month, now_bjt.day, tzinfo=TZ_BJT) - timedelta(days=now_bjt.weekday())
+        monday_start_ms = int(monday_bjt.timestamp() * 1000)
+
+        week_ks = [k for k in (closed_1h or []) if k[0] >= monday_start_ms]
+        if len(week_ks) < 6:
+            # 若周一刚开盘历史样本不足 6 小时，补充前序 48 根 1h K 线平滑过渡
+            week_ks = (closed_1h or [])[-48:] if closed_1h else []
+
+        if not week_ks:
+            # 若无 1h 数据，尝试使用 5m 数据兜底
+            return self.calc_daily_vwap(as_of_ms=as_of_ms)
+
+        cum_vol = 0.0
+        cum_tp_vol = 0.0
+        kl_data = []
+        vwap_series = []
+        for k in week_ks:
+            h, l, c, v = float(k[2]), float(k[3]), float(k[4]), float(k[5])
+            tp = (h + l + c) / 3.0
+            cum_vol += v
+            cum_tp_vol += tp * v
+            kl_data.append((tp, v))
+            vwap_series.append((cum_tp_vol / cum_vol) if cum_vol > 0 else c)
+
+        if cum_vol <= 0:
+            return None
+
+        vwap = round(cum_tp_vol / cum_vol, 2)
+        sum_sq = sum(v * ((tp - vwap) ** 2) for tp, v in kl_data)
+        sigma = math.sqrt(sum_sq / cum_vol)
+        sigma_round = round(sigma, 2)
+
+        last_close = float(week_ks[-1][4])
+        wall_ms = int(time.time() * 1000)
+        is_historical = as_of_ms is not None and abs(t_ms - wall_ms) > 5000
+        cur_px = last_close if is_historical else (float(self.price) if self.price else last_close)
+
+        z_score = round((cur_px - vwap) / sigma, 3) if sigma > 0 else 0.0
+        slope = round(vwap_series[-1] - vwap_series[-4], 2) if len(vwap_series) >= 4 else 0.0
+
+        u1 = round(vwap + sigma, 2)
+        l1 = round(vwap - sigma, 2)
+        u2 = round(vwap + 2 * sigma, 2)
+        l2 = round(vwap - 2 * sigma, 2)
+        u3 = round(vwap + 3 * sigma, 2)
+        l3 = round(vwap - 3 * sigma, 2)
+        mid_upper = round((u1 + u2) / 2.0, 2)
+        mid_lower = round((l1 + l2) / 2.0, 2)
+
+        return {
+            "vwap": vwap,
+            "sigma": sigma_round,
+            "z_score": z_score,
+            "slope": slope,
+            "price": cur_px,
+            "u1": u1, "l1": l1,
+            "u2": u2, "l2": l2,
+            "u3": u3, "l3": l3,
+            "mid_upper": mid_upper,
+            "mid_lower": mid_lower,
+            "n_candles": len(week_ks),
+            "source": "Binance Weekly VWAP (周一 00:00 UTC+8 锚定)",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "age": 0,
+            "stale": False,
+            "as_of_ms": t_ms,
+        }
 
     def calc_daily_vwap(self, as_of_ms=None):
         """
@@ -963,5 +1039,6 @@ class BinanceFuturesFeed:
             "btc_lead_lag": self.get_btc_lead_lag_stats(),
             "ws_connected": bool(self.ws_connected and (time.time() - self.last_ws_message_time < 5.0)),
             "sentiment": sentiment,
+            "weekly_vwap": self.calc_weekly_vwap(),
             "updated_at": datetime.now().strftime("%H:%M:%S"),
         }

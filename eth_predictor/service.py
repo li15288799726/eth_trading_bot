@@ -19,7 +19,7 @@ from pathlib import Path
 from eth_predictor.models import ETHPredictor
 from eth_predictor.optimizer import PredictionOptimizer
 from eth_predictor.storage import PredictionStorage
-from eth_predictor.indicators import safe_float, calc_daily_vwap
+from eth_predictor.indicators import safe_float, calc_daily_vwap, calc_weekly_vwap
 from eth_predictor.macro_events import MacroEventManager
 from eth_predictor.asof import (
     filter_closed_klines, resolve_liq_snapshot, load_liq_history_from_data_dir, now_ms,
@@ -134,6 +134,15 @@ class PredictorService:
         else:
             vwap_daily = calc_daily_vwap(kl_5m, as_of_ms=t_ms, price=price)
 
+        weekly_fn = getattr(feed, "calc_weekly_vwap", None)
+        if callable(weekly_fn):
+            try:
+                vwap_weekly = weekly_fn(as_of_ms=t_ms)
+            except TypeError:
+                vwap_weekly = weekly_fn()
+        else:
+            vwap_weekly = calc_weekly_vwap(kl_1h, as_of_ms=t_ms, price=price)
+
         liq_data = self.load_liq_data(as_of_ms=t_ms)
         rt_liq = getattr(feed, "get_realtime_liquidation_stats", lambda: {})()
         wall_ms = int(time.time() * 1000)
@@ -193,6 +202,7 @@ class PredictorService:
             "global_ls_ratio": micro.get("global_ls_ratio", 1.0),
             "funding_rate": micro.get("funding_rate", 0.0001),
             "vwap_daily": vwap_daily,
+            "vwap_weekly": vwap_weekly,
             "liq_raw_data": liq_data,
             "macro_events": macro_events,
             "realtime_liquidations": rt_liq,
