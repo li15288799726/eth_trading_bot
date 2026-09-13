@@ -43,10 +43,73 @@ def calc_kaufman_efficiency_ratio(klines, period=14):
     return round(min(1.0, max(0.0, er)), 3)
 
 
-def detect_market_regime(klines_5m, klines_1h, vwap_daily, cvd_5m, bb_5m, atr_5m, oi_info=None):
+def get_calendar_market_regime(as_of_ts=None):
     """
-    综合多周期量价特征，判定当前市场微观范式状态
+    识别周一至周五（活跃交易日，高波动、大波段、顺势主导）与周六周日（周末休息日，极低流动性、窄幅微波、假突破频发）
+    根据北京时间 (UTC+8) 严谨裁决。
     """
+    if as_of_ts:
+        ts = as_of_ts / 1000.0 if as_of_ts > 1e11 else as_of_ts
+        dt = datetime.fromtimestamp(ts, tz=TZ_BJT)
+    else:
+        dt = datetime.now(TZ_BJT)
+
+    weekday = dt.weekday()  # 0:周一 ... 4:周五, 5:周六, 6:周日
+    is_weekend = (weekday in (5, 6))
+
+    day_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    day_name = day_names[weekday]
+
+    if is_weekend:
+        regime_name = "WEEKEND_REST"
+        regime_label = f"{day_name}·休息日 (极低成交量/窄幅防假破位)"
+        vol_expected = "LOW"
+        # 周末低流动性：自适应压缩空间门禁与目标点位，防止目标过远超时或门禁过大永远观望
+        space_5m = 3.2
+        tp1_5m = 2.2
+        tp2_5m = 4.8
+        sl_5m = 3.2
+        space_1h = 10.0
+        tp1_1h = 6.0
+        tp2_1h = 14.0
+        sl_1h = 8.0
+    else:
+        regime_name = "WEEKDAY_TRADING"
+        regime_label = f"{day_name}·活跃交易日 (高流动性/大波段顺势)"
+        vol_expected = "HIGH"
+        # 工作日高流动性：维持大波段标准门槛，保证盈亏比
+        space_5m = 6.0
+        tp1_5m = 4.0
+        tp2_5m = 7.5
+        sl_5m = 5.0
+        space_1h = 20.0
+        tp1_1h = 12.0
+        tp2_1h = 25.0
+        sl_1h = 12.0
+
+    return {
+        "is_weekend": is_weekend,
+        "weekday": weekday,
+        "day_name": day_name,
+        "calendar_regime": regime_name,
+        "label": regime_label,
+        "vol_expected": vol_expected,
+        "space_5m": space_5m,
+        "tp1_5m": tp1_5m,
+        "tp2_5m": tp2_5m,
+        "sl_5m": sl_5m,
+        "space_1h": space_1h,
+        "tp1_1h": tp1_1h,
+        "tp2_1h": tp2_1h,
+        "sl_1h": sl_1h,
+    }
+
+
+def detect_market_regime(klines_5m, klines_1h, vwap_daily, cvd_5m, bb_5m, atr_5m, oi_info=None, as_of_ts=None):
+    """
+    综合多周期量价特征与周内日历特征，判定当前市场微观范式状态
+    """
+    calendar = get_calendar_market_regime(as_of_ts)
     price = safe_float(klines_5m[-1][4]) if klines_5m else 2500.0
 
     # 1. 考夫曼效率比 (5m 与 1h)
@@ -119,6 +182,22 @@ def detect_market_regime(klines_5m, klines_1h, vwap_daily, cvd_5m, bb_5m, atr_5m
         trend_strength = min(0.45, composite_er)
 
     # -------------------------------------------------------------
+    # 周末休息日 (低流动性/防假突破) 特殊自适应
+    # -------------------------------------------------------------
+    is_weekend = calendar.get("is_weekend", False)
+    if is_weekend:
+        if regime in ("BULL_TREND", "BEAR_TREND") and trend_strength < 0.85:
+            # 周末无大机构推动，多为缩量慢移，转为弱动量箱体
+            label = f"周末弱动量·{'偏多' if is_bull_trend else '偏空'} (低流动性)"
+            icon = "🛋️"
+        elif regime == "EXPANSION_WHIPSAW":
+            label = "周末微观插针 (极度防假突破)"
+            icon = "🧹"
+        else:
+            label = "周末窄幅震荡 (极低成交量/均值回归)"
+            icon = "🛋️"
+
+    # -------------------------------------------------------------
     # 动态自适应权重系数调度 (Adaptive Weight Multipliers)
     # -------------------------------------------------------------
     if regime in ("BULL_TREND", "BEAR_TREND"):
@@ -128,9 +207,9 @@ def detect_market_regime(klines_5m, klines_1h, vwap_daily, cvd_5m, bb_5m, atr_5m
             "w_vwap": 0.55,       # 均值回归抑制 (-45%)，严禁摸顶抄底
             "w_pos": 0.90,        # 情绪中性
             "w_liq": 1.10,        # 清算磁吸顺势引导
-            "allow_counter_trend": False, # 严禁逆势修正
-            "confidence_boost": 4.0,      # 单边共振置信度红利
-            "tp_multiplier_boost": 1.20   # 顺势目标带适当延伸 (+20%)
+            "allow_counter_trend": False if not is_weekend else True, # 周末允许极值回踩高抛低吸
+            "confidence_boost": 4.0 if not is_weekend else 1.0,
+            "tp_multiplier_boost": 1.20 if not is_weekend else 0.75   # 周末不设过远目标
         }
     elif regime == "RANGE_CONSOLIDATION":
         weight_multipliers = {
@@ -141,7 +220,7 @@ def detect_market_regime(klines_5m, klines_1h, vwap_daily, cvd_5m, bb_5m, atr_5m
             "w_liq": 1.30,        # 清算密集区作为强支撑/阻力位
             "allow_counter_trend": True,  # 允许箱体边界高抛低吸
             "confidence_boost": -2.0,     # 震荡市审慎保守
-            "tp_multiplier_boost": 0.85   # 目标带收敛在箱体内 (-15%)
+            "tp_multiplier_boost": 0.85 if not is_weekend else 0.65   # 周末目标带进一步收敛在箱体内
         }
     else: # EXPANSION_WHIPSAW
         weight_multipliers = {
@@ -150,15 +229,16 @@ def detect_market_regime(klines_5m, klines_1h, vwap_daily, cvd_5m, bb_5m, atr_5m
             "w_vwap": 0.80,
             "w_pos": 1.00,
             "w_liq": 1.60,        # 洗盘本质是掠夺清算流动性，清算引力权重大增 (+60%)
-            "allow_counter_trend": False,
+            "allow_counter_trend": True if is_weekend else False,     # 周末插针大概率是流动性猎杀，反向高抛低吸胜率极高
             "confidence_boost": -4.0,     # 剧烈洗盘期降低预测置信度防诱导
-            "tp_multiplier_boost": 1.35   # 宽幅波幅下防守与目标外扩
+            "tp_multiplier_boost": 1.35 if not is_weekend else 0.80   # 周末微观插针不外扩超大目标
         }
 
     return {
         "regime": regime,
         "label": label,
         "icon": icon,
+        "calendar": calendar,
         "trend_strength": trend_strength,
         "efficiency_ratio_5m": er_5m,
         "efficiency_ratio_1h": er_1h,

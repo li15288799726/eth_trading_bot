@@ -237,12 +237,16 @@ class PredictionLifecycleManager:
             if now_ts < cooldown_until:
                 return False
 
-        # 4. 微观订单流形态过滤 (严禁在多头踩踏时开多，或空头逼空时开空)
+        # 4. 微观订单流形态过滤 (严禁在多头踩踏时开多，或空头逼空时开空，但允许在见底恐慌抛盘反弹时接多、见顶冲高衰竭时接空)
         oi_info = raw_pred.get("oi_info") or {}
         regime = oi_info.get("regime", "CONSOLIDATION")
-        if direction == "UP" and regime in ("BEAR_ATTACK", "LONG_FLUSH"):
+        dir_lbl_str = str(raw_pred.get("dir_label", ""))
+        is_bottom_reversal = ("底部" in dir_lbl_str or "见底" in dir_lbl_str)
+        is_top_reversal = ("顶部" in dir_lbl_str or "见顶" in dir_lbl_str)
+
+        if direction == "UP" and regime in ("BEAR_ATTACK", "LONG_FLUSH") and not is_bottom_reversal:
             return False
-        if direction == "DOWN" and regime in ("BULL_ATTACK", "SHORT_SQUEEZE"):
+        if direction == "DOWN" and regime in ("BULL_ATTACK", "SHORT_SQUEEZE") and not is_top_reversal:
             return False
 
         # 5. 层级共振对齐 (Hierarchical Alignment): 杜绝小周期与大周期打架
@@ -250,17 +254,27 @@ class PredictionLifecycleManager:
             act_1h = self.active_predictions.get("1h")
             dir_1h = act_1h.get("direction") if (act_1h and act_1h.get("status") == "ACTIVE") else None
             if dir_1h == "UP" and direction == "DOWN":
-                # 1H 处于顺势看多时，5M 严禁顺手开空，除非触发极高强度的耗竭反转 (score <= -0.32)
-                if score > -0.32:
+                # 1H 处于顺势看多时，5M 严禁顺手开空，除非触发顶部衰竭反转
+                if score > -0.32 and not is_top_reversal:
                     return False
             elif dir_1h == "DOWN" and direction == "UP":
-                # 1H 处于顺势看空时，5M 严禁顺手开多，除非触发极高强度的超卖反弹 (score >= 0.32)
-                if score < 0.32:
+                # 1H 处于顺势看空时，5M 严禁顺手开多，除非触发底部恐慌见底反转
+                if score < 0.32 and not is_bottom_reversal:
                     return False
 
-        # 6. 空间门槛硬核校验 (方案 B：5M 总空间 >= 6 点才出单，1H >= 20 点，否则保持观望)
+        # 6. 空间门槛硬核校验 (自适应周内活跃日大波段 vs 周末休息日小波段)
         if direction in ("UP", "DOWN"):
-            req_space = 6.0 if tf == "5m" else (20.0 if tf == "1h" else 60.0)
+            is_wk = raw_pred.get("is_weekend")
+            if is_wk is None:
+                as_of_ms = market_snapshot.get("as_of_ms")
+                if as_of_ms:
+                    dt = datetime.fromtimestamp(as_of_ms / 1000.0, tz=TZ_BJT)
+                else:
+                    dt = datetime.now(TZ_BJT)
+                is_wk = (dt.weekday() in (5, 6))
+
+            default_space = (3.2 if is_wk else 6.0) if tf == "5m" else ((10.0 if is_wk else 20.0) if tf == "1h" else 60.0)
+            req_space = safe_float(raw_pred.get("min_space_req", default_space))
             base_p = safe_float(raw_pred.get("base_price", 0.0))
             tp1_p = safe_float(raw_pred.get("tp1", 0.0))
             tp2_p = safe_float(raw_pred.get("tp2", 0.0))
