@@ -231,12 +231,8 @@ class PredictionLifecycleManager:
         if confidence < 65.0:
             return False
 
-        # 3. 冷却期判定 (若刚从偏离终止或止损退出来，强制要求冷却)
-        if act and isinstance(act, dict):
-            now_ts = int(time.time())
-            cooldown_until = act.get("cooldown_until_ts", 0)
-            if now_ts < cooldown_until:
-                return False
+        # 3. 严格遵循用户原则 2：坚决不需要冷却机制，移除任何人为倒计时封口，让算法真实暴露逻辑缺陷
+        # 彻底移除 now_ts < cooldown_until 人为阻断，完全依靠盘口微观结构与空间门禁进行动态守护
 
         # 4. 微观订单流形态过滤 (严禁在多头踩踏时开多，或空头逼空时开空，但允许在见底恐慌抛盘反弹时接多、见顶冲高衰竭时接空)
         oi_info = raw_pred.get("oi_info") or {}
@@ -282,7 +278,7 @@ class PredictionLifecycleManager:
             tp1_p = safe_float(raw_pred.get("tp1", 0.0))
             tp2_p = safe_float(raw_pred.get("tp2", 0.0))
             max_space = max(abs(tp1_p - base_p), abs(tp2_p - base_p)) if base_p > 0 else 0.0
-            if max_space < (req_space - 0.05):
+            if max_space < (req_space - 0.05) or "空间不足" in str(raw_pred.get("dir_label", "")):
                 return False
 
         # 7. 宏观对冲门禁 (防止开单 3 分钟即被宏观利空/利好核验偏离秒杀)
@@ -310,13 +306,9 @@ class PredictionLifecycleManager:
             if act and act.get("status") == "ACTIVE":
                 continue
 
-            # 检查是否满足冷却时间要求
+            # 处于等待开仓观望状态 (用户原则 2：无冷却倒计时，持续动态评估最新盘口)
             if act and act.get("status") == "WAITING_SETUP":
-                cooldown_until = act.get("cooldown_until_ts", 0)
-                if now_ts < cooldown_until:
-                    # 尚在冷却观望中，更新当前参考价
-                    act["base_price"] = price
-                    continue
+                act["base_price"] = price
 
             # 惰性推算最新多周期预测信号
             if all_preds is None:
@@ -1110,16 +1102,13 @@ class PredictionLifecycleManager:
         if pred_id:
             self.storage.update_prediction(pred_id, verified_result, act_obj=act)
 
-        # 设置冷却观望时长 (用户明确指示：不需要冷却机制，方便日后发现问题提高准确率)
-        cooldown_sec = 5  # 极简心跳 5 秒，不设人为长冷却锁死
-
-        # 转入 WAITING_SETUP 观望状态
+        # 转入 WAITING_SETUP 观望状态 (用户原则 2：坚决不需要冷却机制，移除人为倒计时，让算法真实暴露逻辑缺陷)
         self.active_predictions[tf] = self._build_waiting_setup_state(
             tf=tf,
             price=current_price,
             reason=f"前序预测已终止 [{outcome}] ({reason})，正在观望盘口等待下一个明确共振开仓时机"
         )
-        self.active_predictions[tf]["cooldown_until_ts"] = now_ts + cooldown_sec
+        self.active_predictions[tf]["cooldown_until_ts"] = 0
         self._save_active()
 
         print(f"[Lifecycle] 🏁 [{tf}] 预测已结算归档: 结果={outcome} | 胜负={'胜' if is_win else '负'} | 收益={pnl_pct:+.2f}% | 原因={reason} -> 转入观望等待", flush=True)

@@ -340,7 +340,7 @@ class ETHPredictor:
         results["1d"] = pred_1d
 
         # =============================================================
-        # 周期二其次计算：未来 1 小时 (1h) 日内波段（融入 1d 宏观共振引导）
+        # 周期二其次计算：未来 1 小时 (1h) 日内波段（100% 独立研判，不顺应 1D 大周期）
         # =============================================================
         w1h = dict(self.weights["1h"])
         w1h["w_tech"] = w1h["w_tech"] * wm.get("w_tech", 1.0)
@@ -488,7 +488,7 @@ class ETHPredictor:
             created_ts=now_ts,
             created_iso=now_iso,
             expiry_seconds=3600,
-            parent_bias=composite_1d,
+            parent_bias=0.0,  # 1H 100% 独立研判，彻底移除 1D 大周期干预
             market_regime=market_regime,
             bb_bands=bb_1h,
             pivot_levels=pivots_1h,
@@ -617,8 +617,10 @@ class ETHPredictor:
         composite_5m = 0.0
 
         if is_volume_surge and is_buying_climax_top:
-            # 顶部冲高见顶衰竭：反向接空（核验空间：不足 6 点坚决不做判断）
-            has_down_climax_space = (price - val_5m >= min_space_5m) or (price - rlow_5m >= min_space_5m)
+            # 顶部冲高见顶衰竭：反向接空（严格执行原则 1：至下方首个支撑空间不足 6 点坚决不做判断）
+            support_barriers_below = [x for x in [val_5m, rlow_5m] if 0 < x < price]
+            nearest_support = max(support_barriers_below) if support_barriers_below else None
+            has_down_climax_space = (nearest_support is None) or (price - nearest_support >= min_space_5m)
             if has_down_climax_space:
                 custom_5m_dir = "DOWN"
                 custom_5m_label = "🎯 冲高动能衰竭·顶部接空" if not is_weekend else "🛋️ 周末冲高遇阻·顶部接空"
@@ -629,8 +631,10 @@ class ETHPredictor:
                 custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
                 composite_5m = 0.0
         elif is_volume_surge and is_selling_climax_bottom:
-            # 底部恐慌抛盘见底：反向接多（核验空间：不足 6 点坚决不做判断）
-            has_up_climax_space = (vah_5m - price >= min_space_5m) or (rhigh_5m - price >= min_space_5m)
+            # 底部恐慌抛盘见底：反向接多（严格执行原则 1：至上方首个阻力空间不足 6 点坚决不做判断）
+            resist_barriers_above = [x for x in [vah_5m, rhigh_5m] if x > price]
+            nearest_resist = min(resist_barriers_above) if resist_barriers_above else None
+            has_up_climax_space = (nearest_resist is None) or (nearest_resist - price >= min_space_5m)
             if has_up_climax_space:
                 custom_5m_dir = "UP"
                 custom_5m_label = "🎯 恐慌抛盘见底·极值接多" if not is_weekend else "🛋️ 周末插针见底·反弹接多"
@@ -664,7 +668,9 @@ class ETHPredictor:
             is_pullback_ready = (is_near_poc or is_near_val or is_near_vwap or is_wick_absorption)
             is_flow_healthy = (cvd_5m["score"] >= -0.25) and (s_oi_5m >= -0.25) and (not is_bear_attacking_5m)
             # 空间核验：向上至阻力区需至少具备可用波段空间，严禁顶在天花板上接多
-            has_upward_space = (vah_5m - price >= min_space_5m) or (rhigh_5m - price >= min_space_5m)
+            resist_barriers_above = [x for x in [vah_5m, rhigh_5m] if x > price]
+            nearest_resist = min(resist_barriers_above) if resist_barriers_above else None
+            has_upward_space = (nearest_resist is None) or (nearest_resist - price >= min_space_5m)
             is_macro_safe = (s_macro > -0.25)
 
             if is_pullback_ready and is_flow_healthy and has_upward_space and is_macro_safe:
@@ -682,7 +688,7 @@ class ETHPredictor:
                     custom_5m_label = "⏳ 5M空头下杀中·暂停接多观望"
                 else:
                     custom_5m_label = "⏳ 1H顺势看涨·5M脉冲观望(等待回踩)"
-                composite_5m = 0.05
+                composite_5m = 0.0
         elif strategic_1h == "DOWN":
             # -----------------------------------------------------------------
             # 1H 战略看空：5M 寻找反弹阻力接空入场点 (拉升途中严禁盲目摸顶，保持观望)
@@ -695,7 +701,9 @@ class ETHPredictor:
             is_rally_ready = (is_near_poc or is_near_vah or is_near_vwap or is_wick_exhaustion)
             is_flow_healthy = (cvd_5m["score"] <= 0.25) and (s_oi_5m <= 0.25) and (not is_bull_attacking_5m)
             # 空间核验：向下至支撑区需至少具备可用波段空间，严禁砸在地板上接空
-            has_downward_space = (price - val_5m >= min_space_5m) or (price - rlow_5m >= min_space_5m)
+            support_barriers_below = [x for x in [val_5m, rlow_5m] if 0 < x < price]
+            nearest_support = max(support_barriers_below) if support_barriers_below else None
+            has_downward_space = (nearest_support is None) or (price - nearest_support >= min_space_5m)
             is_macro_safe = (s_macro < 0.25)
 
             if is_rally_ready and is_flow_healthy and has_downward_space and is_macro_safe:
@@ -713,14 +721,20 @@ class ETHPredictor:
                     custom_5m_label = "⏳ 5M多头推升中·暂停接空观望"
                 else:
                     custom_5m_label = "⏳ 1H顺势看跌·5M下探观望(等待反弹)"
-                composite_5m = -0.05
+                composite_5m = 0.0
         else:
             # -----------------------------------------------------------------
             # 1H 震荡观望 (NEUTRAL)：5M 严格执行拍卖市场箱体边缘高抛低吸
             # -----------------------------------------------------------------
-            has_box_up_space = (vah_5m - price >= min_space_5m) or (rhigh_5m - price >= min_space_5m)
-            has_box_down_space = (price - val_5m >= min_space_5m) or (price - rlow_5m >= min_space_5m)
-            box_width = max(vah_5m - val_5m, rhigh_5m - rlow_5m)
+            resist_barriers_above = [x for x in [vah_5m, rhigh_5m] if x > price]
+            nearest_resist = min(resist_barriers_above) if resist_barriers_above else None
+            has_box_up_space = (nearest_resist is None) or (nearest_resist - price >= min_space_5m)
+
+            support_barriers_below = [x for x in [val_5m, rlow_5m] if 0 < x < price]
+            nearest_support = max(support_barriers_below) if support_barriers_below else None
+            has_box_down_space = (nearest_support is None) or (price - nearest_support >= min_space_5m)
+
+            box_width = min(vah_5m - val_5m, rhigh_5m - rlow_5m) if (vah_5m > val_5m and rhigh_5m > rlow_5m) else max(vah_5m - val_5m, rhigh_5m - rlow_5m)
 
             # 核心过滤：杜绝在单边阴跌途中把浮动下移的 val_5m 当成底部连续接飞刀，或在单边拉升途中把 vah 当顶
             is_bleeding_downtrend = (cvd_5m.get("score", 0) < -0.20 and lower_wick_ratio < 0.25 and pct_b_5m < 0.25) or is_bear_attacking_5m
@@ -763,17 +777,17 @@ class ETHPredictor:
             elif is_bleeding_downtrend:
                 custom_5m_dir = "NEUTRAL"
                 custom_5m_label = "⏳ 5M顺势下探观望(等待企稳)"
-                composite_5m = -0.05
+                composite_5m = 0.0
             elif is_bleeding_uptrend:
                 custom_5m_dir = "NEUTRAL"
                 custom_5m_label = "⏳ 5M顺势冲高观望(等待受阻)"
-                composite_5m = 0.05
+                composite_5m = 0.0
             else:
                 custom_5m_dir = "NEUTRAL"
                 custom_5m_label = "1H震荡·5M中轴观望"
                 composite_5m = 0.0
 
-        hier_bias = composite_1h * 0.70 + composite_1d * 0.30
+        hier_bias = composite_1h  # 1H 100% 独立，5M 战术执行直接顺应 1H，不再混合 1D
         atr_5m_scaled = float(atr_5m * vol_mult * vol_target_mult_5m * float(gamma_elasticity))
 
         pred_5m = self._build_prediction_record(
@@ -890,10 +904,13 @@ class ETHPredictor:
                     dir_label = "顺势看涨" if direction == "UP" else "顺势看跌"
                     confidence = min(94.0, round(confidence + 4.0, 1))
                     attribution_tags.append("多周期共振")
+            else:
+                if tf == "1d":
+                    dir_label = "宏观偏多" if direction == "UP" else "宏观偏空"
+                elif tf == "1h":
+                    dir_label = "顺势看涨" if direction == "UP" else "顺势看跌"
                 else:
                     dir_label = "看涨" if direction == "UP" else "看跌"
-            else:
-                dir_label = "宏观偏多" if direction == "UP" else "宏观偏空"
 
         # 动态目标位置与结构失效线计算 (用户原则 1：5M 研判空间不足 6 点不做判断，1H>=15点, 1D>=60点)
         min_space_req = max(6.0, safe_float(weights.get("min_directional_space", 6.0))) if tf == "5m" else safe_float(weights.get("min_directional_space", 15.0 if tf == "1h" else 60.0))
@@ -1049,36 +1066,40 @@ class ETHPredictor:
 
         # 空间门槛硬核核验 (用户原则 1：判断行情上涨或下跌空间不足 6 点不做判断，1H>=15点, 1D>=60点)：
         # 若盘面真实波段空间达不到空间门槛，坚决判定为 NEUTRAL 观望，绝不出单！
+        is_breakout = ("突破" in (custom_dir_label or "")) or ("破位" in (custom_dir_label or ""))
         if direction == "UP":
             avail_space = max(tp1 - price, tp2 - price)
-            # 真实阻力压头拦截：若现价距离近端强阻力(VAH/RangeHigh)不足 min_space_req 点且非放量突破，坚决不做判断
-            overhead_barriers = [x for x in [vah, rhigh] if x and x > price]
-            if overhead_barriers:
-                dist_to_resist = min(overhead_barriers) - price
-                if 0 < dist_to_resist < min_space_req and not is_floor_long and custom_direction != "UP":
-                    avail_space = 0.0  # 压在阻力下方空间不足，拦截
+            if not is_breakout:
+                # 真实阻力压头拦截：若现价距离近端强阻力(VAH/RangeHigh)不足 min_space_req 点且非放量突破，坚决不做判断
+                overhead_barriers = [x for x in [vah, rhigh] if x and x > price]
+                if overhead_barriers:
+                    dist_to_resist = min(overhead_barriers) - price
+                    if 0 < dist_to_resist < min_space_req:
+                        avail_space = 0.0  # 压在阻力下方空间不足，拦截
         elif direction == "DOWN":
             avail_space = max(price - tp1, price - tp2)
-            # 真实支撑托底拦截：若现价距离近端强支撑(VAL/RangeLow)不足 min_space_req 点且非放量破位，坚决不做判断
-            floor_barriers = [x for x in [val, rlow] if x and x < price]
-            if floor_barriers:
-                dist_to_support = price - max(floor_barriers)
-                if 0 < dist_to_support < min_space_req and not is_ceiling_short and custom_direction != "DOWN":
-                    avail_space = 0.0  # 砸在支撑上方空间不足，拦截
+            if not is_breakout:
+                # 真实支撑托底拦截：若现价距离近端强支撑(VAL/RangeLow)不足 min_space_req 点且非放量破位，坚决不做判断
+                floor_barriers = [x for x in [val, rlow] if x and x < price]
+                if floor_barriers:
+                    dist_to_support = price - max(floor_barriers)
+                    if 0 < dist_to_support < min_space_req:
+                        avail_space = 0.0  # 砸在支撑上方空间不足，拦截
         else:
             avail_space = 0.0
 
         if direction in ("UP", "DOWN") and (avail_space < min_space_req or abs(tp1 - price) < 3.5):
             direction = "NEUTRAL"
             dir_icon = "⏸️"
-            dir_label = f"空间不足{min_space_req:.0f}点·不做判断"
+            dir_label = f"⏳ 空间不足{min_space_req:.1f}点·不做判断" if tf == "5m" else f"⏳ 空间不足{min_space_req:.0f}点·不做判断"
             confidence = base_conf
+            composite_score = 0.0
             tp1 = 0.0
             tp2 = 0.0
             sl = 0.0
             target_range = "--"
             expected_change_pct = 0.0
-            attribution_tags.append(f"空间不足(<{min_space_req:.0f}点)")
+            attribution_tags.append(f"空间不足(<{min_space_req:.1f}点)")
         elif direction in ("UP", "DOWN"):
             # 空间核验通过：总波段空间 >= min_space_req 点！
             # 方案 B 核心执行：前置第一目标 TP1 设为 3.8~4.5 点用于快速保本，第二目标 TP2 设为 7.0~9.0 点冲刺完整大波段
