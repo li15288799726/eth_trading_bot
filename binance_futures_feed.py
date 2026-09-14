@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover
     as_of_filter = None
     day_start_ms_bjt = None
     now_ms = None
-    INTERVAL_MS = {"5m": 300000, "1h": 3600000, "1d": 86400000}
+    INTERVAL_MS = {"5m": 300000, "15m": 900000, "1h": 3600000, "1d": 86400000}
 
 
 HOSTS = [
@@ -59,6 +59,7 @@ class BinanceFuturesFeed:
         # 实时数据缓存
         self.price = None
         self.klines = []           # 5m K线 [[open_ms, o, h, l, c, vol, ...], ...]
+        self.klines_15m = []       # 15m K线 (用于趋势启动大实体与长影线力竭精准判定)
         self.klines_1h = []        # 1h K线
         self.klines_1d = []        # 1d K线
         self.last_price_time = 0.0
@@ -381,7 +382,10 @@ class BinanceFuturesFeed:
         Incomplete 1h/1d bars must not pollute features.
         """
         with self.data_lock:
-            if tf == "1h":
+            if tf == "15m":
+                raw = list(self.klines_15m or [])
+                interval = "15m"
+            elif tf == "1h":
                 raw = list(self.klines_1h or [])
                 interval = "1h"
             elif tf == "1d":
@@ -784,6 +788,13 @@ class BinanceFuturesFeed:
         if not force and now - getattr(self, "last_htf_update", 0.0) < 60.0:
             return
         try:
+            # 15M K线拉取 100 根 (用于精确判断实体大阳/大阴与长影线衰竭)
+            ks_15m = self._request("/fapi/v1/klines", {
+                "symbol": self.symbol, "interval": "15m", "limit": 100
+            }, timeout=5)
+            if ks_15m and isinstance(ks_15m, list) and len(ks_15m) >= 20:
+                self.klines_15m = ks_15m
+
             # 1H K线拉取 240 根 (充足覆盖整周周线 VWAP 与多周期指标计算)
             ks_1h = self._request("/fapi/v1/klines", {
                 "symbol": self.symbol, "interval": "1h", "limit": 240

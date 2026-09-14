@@ -489,21 +489,63 @@ class PredictionLifecycleManager:
             # -------------------------------------------------------------
             # 4. 纯事件驱动结算与趋势动能生命周期状态机 (延展 / 衰竭 / 翻转)
             # -------------------------------------------------------------
+            vol_oi_data = market_snapshot.get("volume_oi") or {}
+            macro_ev = market_snapshot.get("macro_events") or {}
+            kl_5m_chk = market_snapshot.get("klines_5m_raw") or market_snapshot.get("klines_5m") or current_klines_5m or []
+            kl_15m_chk = market_snapshot.get("klines_15m_raw") or market_snapshot.get("klines_15m") or []
+            kl_1h_chk = market_snapshot.get("klines_1h_raw") or market_snapshot.get("klines_1h") or []
+
             tp_tol = act.get("tp_tolerance", 4.0 if tf == "5m" else (8.0 if tf == "1h" else 20.0))
             is_in_target_zone = (check_high >= tp2 - tp_tol) if direction == "UP" else (check_low <= tp2 + tp_tol if direction == "DOWN" else False)
 
+            # 核验动能衰竭 (用户问题 2 确认：不局限于 TP2，中途打出安全垫一旦衰竭即收割结案)
+            favorable_move = (check_high - base_px) if direction == "UP" else (base_px - check_low)
+            cur_pnl_pct = round(((current_price - base_px) / base_px * 100.0), 3) if direction == "UP" else round(((base_px - current_price) / base_px * 100.0), 3)
+
+            # 顺向打出 2.8 点以上或者已达成 TP1，或者处于盈利状态，均允许触发动能衰竭提早锁定收割
+            has_profit_cushion = (favorable_move >= 2.8) or (act.get("tp1_status") == "REACHED") or (cur_pnl_pct >= 0.08)
+
+            exhaust_info = calc_momentum_exhaustion(kl_5m_chk, kl_1h_chk, vol_oi_data, direction=direction, klines_15m=kl_15m_chk)
+
+            # 分支 1: 动能衰竭中途/终局收割结案 (Exhaustion Finalize - 用户原则: 2400到2350趋势没了即结束)
+            if has_profit_cushion and exhaust_info.get("is_exhausted"):
+                reason_str = f"🏁 动能衰竭收割 · 利润锁定结案: {'; '.join(exhaust_info.get('reasons', []))}"
+                print(f"[Lifecycle] 🏁 [{tf}] {reason_str}", flush=True)
+                self._finalize_prediction(
+                    tf=tf,
+                    act=act,
+                    current_price=current_price,
+                    outcome="EXHAUSTION_WIN",
+                    is_win=True,
+                    tp1_hit=(act.get("tp1_status") == "REACHED" or favorable_move >= 3.5),
+                    tp2_hit=(act.get("tp2_status") == "REACHED"),
+                    sl_hit=act.get("sl_breached", False),
+                    accuracy_score=0.90 if act.get("tp1_status") != "REACHED" else 1.0,
+                    reason=reason_str,
+                    market_snapshot=market_snapshot
+                )
+
+                # 用户问题 3 确认：突变行情无缝翻转 (如衰竭后盘口直接出现反向强攻大单或大阳/大阴突破)
+                reverse_dir = "UP" if direction == "DOWN" else "DOWN"
+                morph_chk = exhaust_info.get("morph_15m") or exhaust_info.get("morph_5m") or {}
+                is_opp_surge = False
+                if reverse_dir == "UP" and (morph_chk.get("is_bull") and morph_chk.get("body_pct", 0) >= 60.0):
+                    is_opp_surge = True
+                elif reverse_dir == "DOWN" and (morph_chk.get("is_bear") and morph_chk.get("body_pct", 0) >= 60.0):
+                    is_opp_surge = True
+
+                oi_opp = (vol_oi_data.get("regime") == "BULL_ATTACK" and reverse_dir == "UP") or (vol_oi_data.get("regime") == "BEAR_ATTACK" and reverse_dir == "DOWN")
+                if is_opp_surge or oi_opp:
+                    flip_reason = f"⚡ 趋势衰竭后盘口突变反转行情({reverse_dir})，触发无缝翻转开单提示！"
+                    print(f"[Lifecycle] ⚡ [{tf}] {flip_reason}", flush=True)
+                    forced_pred = self.predictor.build_forced_prediction(tf, reverse_dir, current_price, market_snapshot)
+                    self._initialize_new_prediction(tf, forced_pred, current_price)
+                    self._save_active()
+                continue
+
+            # 分支 2: 目标带突破加速顺势延展 (Breakout Roll Target)
             if is_in_target_zone or act.get("tp2_status") == "REACHED":
-                # 进入目标核心容差带或已触碰 TP2：触发盘口动能形态与量仓衰竭核验
-                vol_oi_data = market_snapshot.get("volume_oi") or {}
-                macro_ev = market_snapshot.get("macro_events") or {}
-                kl_5m_chk = market_snapshot.get("klines_5m_raw") or market_snapshot.get("klines_5m") or current_klines_5m or []
-                kl_1h_chk = market_snapshot.get("klines_1h_raw") or market_snapshot.get("klines_1h") or []
-
-                accel_info = calc_breakout_acceleration(kl_5m_chk, kl_1h_chk, vol_oi_data, macro_ev, direction=direction)
-                exhaust_info = calc_momentum_exhaustion(kl_5m_chk, kl_1h_chk, vol_oi_data, direction=direction)
-
-                # 分支 A: 突破加速顺势延展 (Breakout Roll Target)
-                # 当 5M/15M 表现为大实体大阴/大阳破位且无反向长影线，宏观未逆转，顺势向下一级周线轨位或清算区延展
+                accel_info = calc_breakout_acceleration(kl_5m_chk, kl_1h_chk, vol_oi_data, macro_ev, direction=direction, klines_15m=kl_15m_chk)
                 if accel_info.get("is_accelerating") and not exhaust_info.get("is_exhausted"):
                     ext_targets = act.get("extended_targets") or []
                     next_tp = None
@@ -538,24 +580,6 @@ class PredictionLifecycleManager:
                     act["target_range"] = f"{next_tp:.2f} ~ {tp1:.2f}" if direction == "DOWN" else f"{tp1:.2f} ~ {next_tp:.2f}"
                     act["stage_label"] = f"🚀 破位加速中 · 目标顺势延展至 {next_tp:.2f} (第{roll_cnt}轮)"
                     print(f"[Lifecycle] 🚀 [{tf}] 突破加速！目标顺势延展 {old_tp2:.2f} -> {next_tp:.2f} (第{roll_cnt}轮) | 理由: {'; '.join(accel_info.get('reasons', []))}", flush=True)
-
-                # 分支 B: 动能衰竭收割结案 (Exhaustion Finalize)
-                # 当出现长影线 Pin Bar 或 OI 暴降出清 + 缩量横盘整理，锁定利润落袋结案
-                elif exhaust_info.get("is_exhausted") and act.get("tp1_status") == "REACHED":
-                    self._finalize_prediction(
-                        tf=tf,
-                        act=act,
-                        current_price=current_price,
-                        outcome="EXHAUSTION_WIN",
-                        is_win=True,
-                        tp1_hit=True,
-                        tp2_hit=(act.get("tp2_status") == "REACHED"),
-                        sl_hit=act.get("sl_breached", False),
-                        accuracy_score=1.0,
-                        reason=f"🏁 动能衰竭收割 · 利润锁定结案: {'; '.join(exhaust_info.get('reasons', []))}",
-                        market_snapshot=market_snapshot
-                    )
-                    continue
 
                 # 兜底：若已触达目标 2 且既不继续加速也不衰竭（平稳停留满 60s），正常落袋大胜
                 elif act.get("tp2_status") == "REACHED" and (now_ts - act.get("tp2_hit_ts", now_ts)) >= 60:
@@ -775,16 +799,16 @@ class PredictionLifecycleManager:
         reverse_dir = "DOWN" if direction == "UP" else "UP"
         is_extreme_reversal = False
 
-        # 各时间框架对应的正常回踩容忍度与极端异动阈值 (8.19单边爆发模式)
+        # 各时间框架对应的正常回踩容忍度与反转异动阈值 (用户问题 3 确认：敏锐识别突变行情并支持无缝翻转)
         if tf == "5m":
             normal_pullback_limit = max(5.0, atr * 1.0)
-            extreme_surge_limit = max(11.0, atr * 2.2)
+            extreme_surge_limit = max(6.0, atr * 1.2)
         elif tf == "1h":
-            normal_pullback_limit = max(18.0, atr * 1.5)
-            extreme_surge_limit = max(35.0, atr * 2.8)
+            normal_pullback_limit = max(16.0, atr * 1.4)
+            extreme_surge_limit = max(20.0, atr * 1.8)
         else: # 1d
-            normal_pullback_limit = max(55.0, atr * 2.2)
-            extreme_surge_limit = max(95.0, atr * 3.8)
+            normal_pullback_limit = max(50.0, atr * 2.0)
+            extreme_surge_limit = max(80.0, atr * 3.2)
 
         # -------------------------------------------------------------
         # 因子 1: 成交量与 CVD / Taker 买卖比 (针对1H/1D扩展回溯窗口并放宽微观门槛)

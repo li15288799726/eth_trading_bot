@@ -97,15 +97,18 @@ class PredictorService:
         get_closed = getattr(feed, "get_closed_klines", None)
         if callable(get_closed):
             kl_5m = get_closed("5m", as_of_ms=t_ms)
+            kl_15m = get_closed("15m", as_of_ms=t_ms)
             kl_1h = get_closed("1h", as_of_ms=t_ms)
             kl_1d = get_closed("1d", as_of_ms=t_ms)
         else:
             kl_5m = filter_closed_klines(getattr(feed, "klines", []), as_of_ms=t_ms, interval="5m")
+            kl_15m = filter_closed_klines(getattr(feed, "klines_15m", []), as_of_ms=t_ms, interval="15m")
             kl_1h = filter_closed_klines(getattr(feed, "klines_1h", []), as_of_ms=t_ms, interval="1h")
             kl_1d = filter_closed_klines(getattr(feed, "klines_1d", []), as_of_ms=t_ms, interval="1d")
 
         # Raw (may include forming bar) — lifecycle TP/SL tracking only
         kl_5m_raw = list(getattr(feed, "klines", []) or [])
+        kl_15m_raw = list(getattr(feed, "klines_15m", []) or [])
         kl_1h_raw = list(getattr(feed, "klines_1h", []) or [])
         kl_1d_raw = list(getattr(feed, "klines_1d", []) or [])
 
@@ -187,9 +190,11 @@ class PredictorService:
             "price": price,
             "as_of_ms": t_ms,
             "klines_5m": kl_5m,
+            "klines_15m": kl_15m,
             "klines_1h": kl_1h,
             "klines_1d": kl_1d,
             "klines_5m_raw": kl_5m_raw,
+            "klines_15m_raw": kl_15m_raw,
             "klines_1h_raw": kl_1h_raw,
             "klines_1d_raw": kl_1d_raw,
             "oi_current": micro.get("oi_current", 0.0),

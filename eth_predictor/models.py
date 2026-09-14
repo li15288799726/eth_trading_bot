@@ -15,7 +15,7 @@ from eth_predictor.indicators import (
     calc_daily_vwap, calc_weekly_vwap, calc_atr, calc_rsi, calc_bollinger_bands,
     calc_ema_ribbon, calc_cvd, calc_pivot_levels,
     calc_oi_matrix, calc_positioning_sentiment, calc_liquidation_gravity,
-    calc_volume_profile, safe_float,
+    calc_volume_profile, safe_float, calc_candlestick_morphology,
     calc_rolling_quantiles, calc_adaptive_volume_regime,
     calc_adaptive_vwap_extremes, calc_adaptive_exhaustion
 )
@@ -130,6 +130,7 @@ class ETHPredictor:
         as_of_ms = market_snapshot.get("as_of_ms")
         t_ms = now_ms(as_of_ms)
         kl_5m = filter_closed_klines(market_snapshot.get("klines_5m", []), as_of_ms=t_ms, interval="5m")
+        kl_15m = filter_closed_klines(market_snapshot.get("klines_15m", []), as_of_ms=t_ms, interval="15m")
         kl_1h = filter_closed_klines(market_snapshot.get("klines_1h", []), as_of_ms=t_ms, interval="1h")
         kl_1d = filter_closed_klines(market_snapshot.get("klines_1d", []), as_of_ms=t_ms, interval="1d")
         liq_raw = market_snapshot.get("liq_raw_data", {}) or {}
@@ -177,7 +178,7 @@ class ETHPredictor:
         # 1. 动态自适应大户持仓基准 (改动3: 替换写死的 1.30，消除常态化看多偏差)
         dyn_ls_baseline = self.get_dynamic_ls_baseline(top_ls_ratio)
         pos_sentiment = calc_positioning_sentiment(top_ls_ratio, 1.0, global_ls_ratio, taker_ratio_5m, funding_rate, top_ls_baseline=dyn_ls_baseline)
-        liq_gravity = calc_liquidation_gravity(price, liq_raw, gamma=1.2)
+        liq_gravity = market_snapshot.get("liquidation_gravity") or calc_liquidation_gravity(price, liq_raw, gamma=1.2)
 
         # 动态自适应量能范式与目标乘数 (改动3: 动态量比)
         vol_regime_5m = calc_adaptive_volume_regime(kl_5m)
@@ -583,9 +584,16 @@ class ETHPredictor:
         strategic_1h = pred_1h.get("direction", "NEUTRAL")
         score_1h = safe_float(pred_1h.get("composite_score", 0.0))
 
+        # 15M K 线微观形态精准识别 (用户细节 1 与细节 2 落地)
+        morph_15m = calc_candlestick_morphology(kl_15m, -1) if kl_15m else {}
+        is_pinbar_15m_top = bool(morph_15m.get("is_pinbar_top", False))
+        is_pinbar_15m_bottom = bool(morph_15m.get("is_pinbar_bottom", False))
+        wick_15m_upper = safe_float(morph_15m.get("upper_shadow_pct", 0.0)) / 100.0
+        wick_15m_lower = safe_float(morph_15m.get("lower_shadow_pct", 0.0)) / 100.0
+
         # 5M 顶部与底部微观形态精准识别 (Pinbar / Climax / Exhaustion Reversal)
-        is_pinbar_top = (upper_wick_ratio >= 0.28) and (price >= rhigh_5m - 1.5 or price >= vah_5m - 1.0 or pct_b_5m >= 0.75)
-        is_pinbar_bottom = (lower_wick_ratio >= 0.28) and (price <= rlow_5m + 1.5 or price <= val_5m + 1.0 or pct_b_5m <= 0.25)
+        is_pinbar_top = (upper_wick_ratio >= 0.28 or is_pinbar_15m_top) and (price >= rhigh_5m - 1.5 or price >= vah_5m - 1.0 or pct_b_5m >= 0.75)
+        is_pinbar_bottom = (lower_wick_ratio >= 0.28 or is_pinbar_15m_bottom) and (price <= rlow_5m + 1.5 or price <= val_5m + 1.0 or pct_b_5m <= 0.25)
 
         # 特例：极端单边放量真突破 vs 极值见顶/恐慌见底高抛低吸
         is_volume_surge = bool(vol_regime_5m.get("is_surge"))
@@ -596,18 +604,36 @@ class ETHPredictor:
         is_bull_attacking_5m = (oi_matrix_5m.get("regime") == "BULL_ATTACK") or (cvd_5m.get("score", 0) > 0.25 and px_chg_5m > 0)
         is_bear_attacking_5m = (oi_matrix_5m.get("regime") == "BEAR_ATTACK") or (cvd_5m.get("score", 0) < -0.25 and px_chg_5m < 0)
 
+        # 清算区假突破扫荡反转模型 (Sweep & Reverse - 用户原则 4: 穿透清算区不等于延续，多为假穿透诱多诱空反向走)
+        top_longs = liq_gravity.get("top_long_clusters") or []
+        top_shorts = liq_gravity.get("top_short_clusters") or []
+
+        is_long_liq_swept = False
+        if top_longs:
+            nearest_long_liq = safe_float(top_longs[0].get("price", 0.0))
+            if nearest_long_liq > 0 and abs(price - nearest_long_liq) <= max(10.0, atr_5m * 2.0):
+                if (lower_wick_ratio >= 0.28 or is_pinbar_bottom or is_pinbar_15m_bottom or wick_15m_lower >= 0.30) and not is_bear_attacking_5m:
+                    is_long_liq_swept = True
+
+        is_short_liq_swept = False
+        if top_shorts:
+            nearest_short_liq = safe_float(top_shorts[0].get("price", 0.0))
+            if nearest_short_liq > 0 and abs(price - nearest_short_liq) <= max(10.0, atr_5m * 2.0):
+                if (upper_wick_ratio >= 0.28 or is_pinbar_top or is_pinbar_15m_top or wick_15m_upper >= 0.30) and not is_bull_attacking_5m:
+                    is_short_liq_swept = True
+
         # 底部见底判定：当出现巨量或价格击穿 rlow_5m 时，必须严格区分“真破位”与“恐慌抛盘见底 (Selling Climax)”
         is_selling_climax_bottom = (
             (not is_bear_attacking_5m) and
             (price <= rlow_5m + 0.8 or pct_b_5m <= 0.15 or rsi_5m <= 32.0) and
-            (lower_wick_ratio >= 0.28 or exhaustion_penalty > 0.20 or (is_weekend and lower_wick_ratio >= 0.20))
+            (lower_wick_ratio >= 0.28 or wick_15m_lower >= 0.28 or exhaustion_penalty > 0.20 or (is_weekend and lower_wick_ratio >= 0.20))
         )
 
         # 顶部见顶判定：当出现巨量或价格击穿 rhigh_5m 时，必须严格区分“真突破”与“冲高衰竭见顶 (Buying Climax)”
         is_buying_climax_top = (
             (not is_bull_attacking_5m) and
             (price >= rhigh_5m - 0.8 or pct_b_5m >= 0.85 or rsi_5m >= 68.0) and
-            (upper_wick_ratio >= 0.28 or exhaustion_penalty < -0.20 or (is_weekend and upper_wick_ratio >= 0.20))
+            (upper_wick_ratio >= 0.28 or wick_15m_upper >= 0.28 or exhaustion_penalty < -0.20 or (is_weekend and upper_wick_ratio >= 0.20))
         )
 
         custom_5m_dir = None
@@ -616,7 +642,35 @@ class ETHPredictor:
         is_5m_at_floor = False
         composite_5m = 0.0
 
-        if is_volume_surge and is_buying_climax_top:
+        if is_long_liq_swept:
+            # 清算区诱空插针扫荡反转接多 (原则 1 空间门禁严格校验)
+            resist_barriers_above = [x for x in [vah_5m, rhigh_5m] if x > price]
+            nearest_resist = min(resist_barriers_above) if resist_barriers_above else None
+            has_up_space = (nearest_resist is None) or (nearest_resist - price >= min_space_5m)
+            if has_up_space:
+                custom_5m_dir = "UP"
+                custom_5m_label = "🪤 清算区诱空扫荡·反转接多"
+                composite_5m = 0.50
+                is_5m_at_floor = True
+            else:
+                custom_5m_dir = "NEUTRAL"
+                custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
+                composite_5m = 0.0
+        elif is_short_liq_swept:
+            # 清算区诱多插针扫荡反转接空 (原则 1 空间门禁严格校验)
+            support_barriers_below = [x for x in [val_5m, rlow_5m] if 0 < x < price]
+            nearest_support = max(support_barriers_below) if support_barriers_below else None
+            has_down_space = (nearest_support is None) or (price - nearest_support >= min_space_5m)
+            if has_down_space:
+                custom_5m_dir = "DOWN"
+                custom_5m_label = "🪤 清算区诱多冲高扫荡·反向接空"
+                composite_5m = -0.50
+                is_5m_at_ceiling = True
+            else:
+                custom_5m_dir = "NEUTRAL"
+                custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
+                composite_5m = 0.0
+        elif is_volume_surge and is_buying_climax_top:
             # 顶部冲高见顶衰竭：反向接空（严格执行原则 1：至下方首个支撑空间不足 6 点坚决不做判断）
             support_barriers_below = [x for x in [val_5m, rlow_5m] if 0 < x < price]
             nearest_support = max(support_barriers_below) if support_barriers_below else None
@@ -1066,11 +1120,18 @@ class ETHPredictor:
 
         # 空间门槛硬核核验 (用户原则 1：判断行情上涨或下跌空间不足 6 点不做判断，1H>=15点, 1D>=60点)：
         # 若盘面真实波段空间达不到空间门槛，坚决判定为 NEUTRAL 观望，绝不出单！
-        is_breakout = ("突破" in (custom_dir_label or "")) or ("破位" in (custom_dir_label or ""))
+        is_exempt_from_barrier = (
+            ("突破" in (custom_dir_label or "")) or
+            ("破位" in (custom_dir_label or "")) or
+            ("反转" in (custom_dir_label or "")) or
+            ("扫荡" in (custom_dir_label or "")) or
+            is_floor_long or
+            is_ceiling_short
+        )
         if direction == "UP":
             avail_space = max(tp1 - price, tp2 - price)
-            if not is_breakout:
-                # 真实阻力压头拦截：若现价距离近端强阻力(VAH/RangeHigh)不足 min_space_req 点且非放量突破，坚决不做判断
+            if not is_exempt_from_barrier:
+                # 真实阻力压头拦截：若现价距离近端强阻力(VAH/RangeHigh)不足 min_space_req 点且非突破/反转，坚决不做判断
                 overhead_barriers = [x for x in [vah, rhigh] if x and x > price]
                 if overhead_barriers:
                     dist_to_resist = min(overhead_barriers) - price
@@ -1078,8 +1139,8 @@ class ETHPredictor:
                         avail_space = 0.0  # 压在阻力下方空间不足，拦截
         elif direction == "DOWN":
             avail_space = max(price - tp1, price - tp2)
-            if not is_breakout:
-                # 真实支撑托底拦截：若现价距离近端强支撑(VAL/RangeLow)不足 min_space_req 点且非放量破位，坚决不做判断
+            if not is_exempt_from_barrier:
+                # 真实支撑托底拦截：若现价距离近端强支撑(VAL/RangeLow)不足 min_space_req 点且非破位/反转，坚决不做判断
                 floor_barriers = [x for x in [val, rlow] if x and x < price]
                 if floor_barriers:
                     dist_to_support = price - max(floor_barriers)

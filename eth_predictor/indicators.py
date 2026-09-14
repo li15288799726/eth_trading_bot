@@ -451,10 +451,10 @@ def calc_candlestick_morphology(klines, bar_index=-1):
     }
 
 
-def calc_momentum_exhaustion(klines_5m, klines_1h, vol_oi, direction="DOWN"):
+def calc_momentum_exhaustion(klines_5m, klines_1h, vol_oi, direction="DOWN", klines_15m=None):
     """
-    盘口动能衰竭与多头/空头出清力竭核验：
-    1. 15M / 5M 出现长影线反抽 (影线 >= 50%)
+    盘口动能衰竭与多头/空头出清力竭核验 (用户细节 2)：
+    1. 15M / 5M 出现长影线反抽 (长影线 >= 45%)
     2. 持仓量 (OI) 发生大规模断崖式下降 (多头爆仓/空头去杠杆出清完毕，无新卖/买盘)
     3. 成交量较急跌/急涨峰值大幅收缩 (萎缩至 35% 以下)
     4. K 线进入小幅窄幅震荡 (<= 7.5U 振幅) 停滞不前
@@ -462,19 +462,30 @@ def calc_momentum_exhaustion(klines_5m, klines_1h, vol_oi, direction="DOWN"):
     reasons = []
     vol_oi = vol_oi or {}
 
-    # 1. 影线核验
+    # 1. 影线核验：优先采用 15M K线判定长影线力竭 (结合 5M)
+    target_kl = klines_15m if (klines_15m and len(klines_15m) >= 1) else klines_5m
+    tf_name = "15M" if (klines_15m and len(klines_15m) >= 1) else "5M"
+
+    morph_cur = calc_candlestick_morphology(target_kl, -1)
+    morph_prev = calc_candlestick_morphology(target_kl, -2) if len(target_kl or []) >= 2 else morph_cur
     morph_5m = calc_candlestick_morphology(klines_5m, -1)
     morph_prev_5m = calc_candlestick_morphology(klines_5m, -2) if len(klines_5m or []) >= 2 else morph_5m
 
     pinbar_detected = False
     if direction == "DOWN":
-        if morph_5m["is_pinbar_bottom"] or morph_prev_5m["is_pinbar_bottom"]:
+        if morph_cur["is_pinbar_bottom"] or morph_prev["is_pinbar_bottom"]:
             pinbar_detected = True
-            reasons.append(f"收出长下影线({morph_5m['lower_shadow_pct']}%)")
+            reasons.append(f"{tf_name}收出长下影线({morph_cur['lower_shadow_pct']}%)")
+        elif morph_5m["is_pinbar_bottom"] or morph_prev_5m["is_pinbar_bottom"]:
+            pinbar_detected = True
+            reasons.append(f"5M收出长下影线({morph_5m['lower_shadow_pct']}%)")
     elif direction == "UP":
-        if morph_5m["is_pinbar_top"] or morph_prev_5m["is_pinbar_top"]:
+        if morph_cur["is_pinbar_top"] or morph_prev["is_pinbar_top"]:
             pinbar_detected = True
-            reasons.append(f"收出长上影线({morph_5m['upper_shadow_pct']}%)")
+            reasons.append(f"{tf_name}收出长上影线({morph_cur['upper_shadow_pct']}%)")
+        elif morph_5m["is_pinbar_top"] or morph_prev_5m["is_pinbar_top"]:
+            pinbar_detected = True
+            reasons.append(f"5M收出长上影线({morph_5m['upper_shadow_pct']}%)")
 
     # 2. 持仓量出清核验 (出清意味着燃料耗尽)
     oi_delta_1h = safe_float(vol_oi.get("oi_delta_1h", 0.0))
@@ -518,28 +529,40 @@ def calc_momentum_exhaustion(klines_5m, klines_1h, vol_oi, direction="DOWN"):
         "tight_consolidation": tight_consolidation,
         "reasons": reasons,
         "morph_5m": morph_5m,
+        "morph_15m": morph_cur if tf_name == "15M" else None,
     }
 
 
-def calc_breakout_acceleration(klines_5m, klines_1h, vol_oi, macro_events, direction="DOWN"):
+def calc_breakout_acceleration(klines_5m, klines_1h, vol_oi, macro_events, direction="DOWN", klines_15m=None):
     """
-    判定突破清算区后是否处于“趋势刚刚启动，加速下探/上攻”形态：
-    1. K 线呈现大实体 (实体比 >= 60%, 影线 <= 25%)
+    判定突破清算区后是否处于“趋势刚刚启动，加速下探/上攻”形态 (用户细节 1)：
+    优先采用 15M K 线（结合 5M）严格核验大实体破位与无反向长影线：
+    1. 15M/5M K 线呈现大实体 (实体比 >= 60%, 影线 <= 25%)
     2. 宏观面 (ETF/政策) 无逆向冲突
     """
     reasons = []
+    target_kl = klines_15m if (klines_15m and len(klines_15m) >= 1) else klines_5m
+    tf_name = "15M" if (klines_15m and len(klines_15m) >= 1) else "5M"
+
+    morph_cur = calc_candlestick_morphology(target_kl, -1)
+    morph_prev = calc_candlestick_morphology(target_kl, -2) if len(target_kl or []) >= 2 else morph_cur
     morph_5m = calc_candlestick_morphology(klines_5m, -1)
-    morph_prev_5m = calc_candlestick_morphology(klines_5m, -2) if len(klines_5m or []) >= 2 else morph_5m
 
     is_candle_strong = False
     if direction == "DOWN":
-        if morph_5m["is_marubozu_bear"] or morph_prev_5m["is_marubozu_bear"] or (morph_5m["is_bear"] and morph_5m["body_pct"] >= 60.0 and morph_5m["lower_shadow_pct"] <= 25.0):
+        if morph_cur["is_marubozu_bear"] or morph_prev["is_marubozu_bear"] or (morph_cur["is_bear"] and morph_cur["body_pct"] >= 60.0 and morph_cur["lower_shadow_pct"] <= 25.0):
             is_candle_strong = True
-            reasons.append(f"实体大阴线放量破位(实体 {morph_5m['body_pct']}%, 下影 {morph_5m['lower_shadow_pct']}%)")
+            reasons.append(f"{tf_name}实体大阴线放量破位(实体 {morph_cur['body_pct']}%, 下影 {morph_cur['lower_shadow_pct']}%)")
+        elif morph_5m["is_marubozu_bear"] or (morph_5m["is_bear"] and morph_5m["body_pct"] >= 65.0 and morph_5m["lower_shadow_pct"] <= 20.0):
+            is_candle_strong = True
+            reasons.append(f"5M实体大阴线放量破位(实体 {morph_5m['body_pct']}%, 下影 {morph_5m['lower_shadow_pct']}%)")
     elif direction == "UP":
-        if morph_5m["is_marubozu_bull"] or morph_prev_5m["is_marubozu_bull"] or (morph_5m["is_bull"] and morph_5m["body_pct"] >= 60.0 and morph_5m["upper_shadow_pct"] <= 25.0):
+        if morph_cur["is_marubozu_bull"] or morph_prev["is_marubozu_bull"] or (morph_cur["is_bull"] and morph_cur["body_pct"] >= 60.0 and morph_cur["upper_shadow_pct"] <= 25.0):
             is_candle_strong = True
-            reasons.append(f"实体大阳线放量上攻(实体 {morph_5m['body_pct']}%, 上影 {morph_5m['upper_shadow_pct']}%)")
+            reasons.append(f"{tf_name}实体大阳线放量上攻(实体 {morph_cur['body_pct']}%, 上影 {morph_cur['upper_shadow_pct']}%)")
+        elif morph_5m["is_marubozu_bull"] or (morph_5m["is_bull"] and morph_5m["body_pct"] >= 65.0 and morph_5m["upper_shadow_pct"] <= 20.0):
+            is_candle_strong = True
+            reasons.append(f"5M实体大阳线放量上攻(实体 {morph_5m['body_pct']}%, 上影 {morph_5m['upper_shadow_pct']}%)")
 
     macro_ok = True
     macro_events = macro_events or {}
@@ -559,6 +582,7 @@ def calc_breakout_acceleration(klines_5m, klines_1h, vol_oi, macro_events, direc
         "macro_ok": macro_ok,
         "reasons": reasons,
         "morph_5m": morph_5m,
+        "morph_15m": morph_cur if tf_name == "15M" else None,
     }
 
 
