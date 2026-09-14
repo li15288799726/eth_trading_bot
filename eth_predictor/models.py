@@ -381,32 +381,48 @@ class ETHPredictor:
             body_ratio_1h = abs(c_1h - o_1h) / hl_1h
             upper_wick_1h = (h_1h - max(o_1h, c_1h)) / hl_1h
             lower_wick_1h = (min(o_1h, c_1h) - l_1h) / hl_1h
-            is_bleeding_down_1h = (c_1h < o_1h) and (body_ratio_1h >= 0.38) and (lower_wick_1h < 0.18)
-            is_surging_up_1h = (c_1h > o_1h) and (body_ratio_1h >= 0.38) and (upper_wick_1h < 0.18)
+            is_bleeding_down_1h = (c_1h < o_1h) and (body_ratio_1h >= 0.30) and (lower_wick_1h < 0.30)
+            is_surging_up_1h = (c_1h > o_1h) and (body_ratio_1h >= 0.30) and (upper_wick_1h < 0.30)
         else:
             lower_wick_1h, upper_wick_1h, is_bleeding_down_1h, is_surging_up_1h = 0.3, 0.3, False, False
 
         # 1H 独立动量刹车：
-        # 1) 空头大单主动增仓狂暴砸盘中，严禁盲目在通道下轨摸底接多！
-        is_1h_short_dumping = is_bleeding_down_1h or (oi_delta_1h > 5000.0 and px_chg_1h < -4.0 and lower_wick_1h < 0.18) or (oi_matrix_1h["signal"] <= -0.28 and lower_wick_1h < 0.18)
-        # 2) 多头大单主动增仓狂暴逼空中，严禁盲目在通道上轨摸顶接空！
-        is_1h_long_surging = is_surging_up_1h or (oi_delta_1h > 5000.0 and px_chg_1h > 4.0 and upper_wick_1h < 0.18) or (oi_matrix_1h["signal"] >= 0.28 and upper_wick_1h < 0.18)
+        # 1) 空头下杀/狂暴砸盘中，严禁盲目在通道下轨摸底接多！
+        is_1h_short_dumping = (
+            is_bleeding_down_1h or
+            (px_chg_1h < -4.0 and lower_wick_1h < 0.28) or
+            (oi_matrix_1h.get("regime") == "BEAR_ATTACK") or
+            (cvd_5m.get("score", 0) < -0.30 and px_chg_1h < -1.5) or
+            (ema_ribbon_1h.get("score", 0) <= -0.35 and price < poc_1h) or
+            (oi_matrix_1h["signal"] <= -0.20 and lower_wick_1h < 0.28)
+        )
+        # 2) 多头逼空/狂暴拉升中，严禁盲目在通道上轨摸顶接空！
+        is_1h_long_surging = (
+            is_surging_up_1h or
+            (px_chg_1h > 4.0 and upper_wick_1h < 0.28) or
+            (oi_matrix_1h.get("regime") == "BULL_ATTACK") or
+            (cvd_5m.get("score", 0) > 0.30 and px_chg_1h > 1.5) or
+            (ema_ribbon_1h.get("score", 0) >= 0.35 and price > poc_1h) or
+            (oi_matrix_1h["signal"] >= 0.20 and upper_wick_1h < 0.28)
+        )
 
         # 1H 突破判定 (100% 独立研判，不顺应 1D 大周期)
         req_breakout_vol_1h = 1.8 if is_weekend else 1.4
         is_1h_breakout_up = (price >= rhigh_1h - 2.0) and (vol_ratio >= req_breakout_vol_1h) and (oi_matrix_1h["signal"] >= 0.15)
         is_1h_breakout_down = (price <= rlow_1h + 2.0) and (vol_ratio >= req_breakout_vol_1h) and (oi_matrix_1h["signal"] <= -0.15)
 
-        # 1H 顶部接空判定 (Range Ceiling Short Zone) - 独立研判，排除多头狂暴逼空途中
-        is_1h_at_ceiling = (not is_1h_breakout_up) and (not is_1h_long_surging) and (price >= poc_1h) and (
+        # 1H 顶部接空判定 (Range Ceiling Short Zone) - 独立研判，必须处于非多头冲刺态且具备拒绝滞涨形态
+        has_top_rejection_1h = (upper_wick_1h >= 0.25) or (rsi_1h >= 72.0) or (cvd_5m.get("score", 0) < -0.15) or is_weekend
+        is_1h_at_ceiling = (not is_1h_breakout_up) and (not is_1h_long_surging) and (price >= poc_1h) and has_top_rejection_1h and (
             (price >= vah_1h - 3.0) or
             (pct_b_1h >= 0.80) or
             (pivots_1h and price >= pivots_1h.get("r1", 99999) - 2.0) or
             (is_weekend and price >= rhigh_1h - 1.5)
         )
 
-        # 1H 底部接多判定 (Range Floor Long Zone) - 独立研判，排除空头狂暴下杀途中
-        is_1h_at_floor = (not is_1h_breakout_down) and (not is_1h_short_dumping) and (price <= poc_1h) and (
+        # 1H 底部接多判定 (Range Floor Long Zone) - 独立研判，必须处于非空头下杀态且具备下影吸收形态
+        has_bottom_absorption_1h = (lower_wick_1h >= 0.25) or (rsi_1h <= 28.0) or (cvd_5m.get("score", 0) > 0.15) or is_weekend
+        is_1h_at_floor = (not is_1h_breakout_down) and (not is_1h_short_dumping) and (price <= poc_1h) and has_bottom_absorption_1h and (
             (price <= val_1h + 3.0) or
             (pct_b_1h <= 0.20) or
             (pivots_1h and price <= pivots_1h.get("s1", 0) + 2.0) or
@@ -576,16 +592,22 @@ class ETHPredictor:
         # 严格执行用户原则 1：判断上涨或下跌空间不足 6 点时，坚决不做判断（保持观望）
         min_space_5m = max(6.0, safe_float(w5.get("min_directional_space", 6.0)))
 
+        # 判定微观强攻态 (BULL_ATTACK / BEAR_ATTACK)
+        is_bull_attacking_5m = (oi_matrix_5m.get("regime") == "BULL_ATTACK") or (cvd_5m.get("score", 0) > 0.25 and px_chg_5m > 0)
+        is_bear_attacking_5m = (oi_matrix_5m.get("regime") == "BEAR_ATTACK") or (cvd_5m.get("score", 0) < -0.25 and px_chg_5m < 0)
+
         # 底部见底判定：当出现巨量或价格击穿 rlow_5m 时，必须严格区分“真破位”与“恐慌抛盘见底 (Selling Climax)”
         is_selling_climax_bottom = (
+            (not is_bear_attacking_5m) and
             (price <= rlow_5m + 0.8 or pct_b_5m <= 0.15 or rsi_5m <= 32.0) and
-            (lower_wick_ratio >= 0.22 or exhaustion_penalty > 0.15 or is_weekend or s_cross_abs >= 0.30 or strategic_1h == "UP")
+            (lower_wick_ratio >= 0.28 or exhaustion_penalty > 0.20 or (is_weekend and lower_wick_ratio >= 0.20))
         )
 
         # 顶部见顶判定：当出现巨量或价格击穿 rhigh_5m 时，必须严格区分“真突破”与“冲高衰竭见顶 (Buying Climax)”
         is_buying_climax_top = (
+            (not is_bull_attacking_5m) and
             (price >= rhigh_5m - 0.8 or pct_b_5m >= 0.85 or rsi_5m >= 68.0) and
-            (upper_wick_ratio >= 0.22 or exhaustion_penalty < -0.15 or is_weekend or s_cross_abs <= -0.30 or strategic_1h == "DOWN")
+            (upper_wick_ratio >= 0.28 or exhaustion_penalty < -0.20 or (is_weekend and upper_wick_ratio >= 0.20))
         )
 
         custom_5m_dir = None
@@ -618,29 +640,29 @@ class ETHPredictor:
                 custom_5m_dir = "NEUTRAL"
                 custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
                 composite_5m = 0.0
-        elif is_volume_surge and (price >= rhigh_5m - 0.5) and (s_oi_5m > 0.25) and (not is_weekend) and (upper_wick_ratio < 0.20) and (strategic_1h != "DOWN"):
-            # 工作日真突破追多 (周末严禁追突破)
+        elif is_volume_surge and (price >= rhigh_5m - 0.5) and (s_oi_5m > 0.20) and (not is_weekend) and (upper_wick_ratio < 0.25):
+            # 工作日真突破追多 (周末严禁追突破；解除 1H 对 5M 顺势做多的死锁)
             custom_5m_dir = "UP"
             custom_5m_label = "⚡ 极端放量真突破跟随追多"
             composite_5m = 0.60
             is_5m_at_floor = True
-        elif is_volume_surge and (price <= rlow_5m + 0.5) and (s_oi_5m < -0.25) and (not is_weekend) and (lower_wick_ratio < 0.20) and (strategic_1h != "UP"):
-            # 工作日真破位追空 (周末严禁追破位)
+        elif is_volume_surge and (price <= rlow_5m + 0.5) and (s_oi_5m < -0.20) and (not is_weekend) and (lower_wick_ratio < 0.25):
+            # 工作日真破位追空 (周末严禁追破位；解除 1H 对 5M 顺势做空的死锁)
             custom_5m_dir = "DOWN"
             custom_5m_label = "⚡ 极端放量真破位跟随追空"
             composite_5m = -0.60
             is_5m_at_ceiling = True
         elif strategic_1h == "UP":
             # -----------------------------------------------------------------
-            # 1H 战略看多：5M 坚决不开空！专职寻找回踩支撑的极佳接多入场点
+            # 1H 战略看多：5M 寻找回踩吸筹接多入场点 (下杀途中严禁接飞刀，保持观望)
             # -----------------------------------------------------------------
             is_near_poc = abs(price - poc_5m) <= (atr_5m * 0.8)
             is_near_val = price <= (val_5m + atr_5m * 0.8)
             is_near_vwap = vwap_ext_5m["current_z"] <= 0.3
-            is_wick_absorption = (lower_wick_ratio >= 0.25 and pct_b_5m <= 0.35) or (exhaustion_penalty > 0.2) or (s_cross_abs >= 0.35) or is_pinbar_bottom
+            is_wick_absorption = (lower_wick_ratio >= 0.25 and pct_b_5m <= 0.35) or (exhaustion_penalty > 0.2) or is_pinbar_bottom
 
             is_pullback_ready = (is_near_poc or is_near_val or is_near_vwap or is_wick_absorption)
-            is_flow_healthy = (cvd_5m["score"] >= -0.35) and (s_oi_5m >= -0.35) and (s_cross_mom >= -0.45)
+            is_flow_healthy = (cvd_5m["score"] >= -0.25) and (s_oi_5m >= -0.25) and (not is_bear_attacking_5m)
             # 空间核验：向上至阻力区需至少具备可用波段空间，严禁顶在天花板上接多
             has_upward_space = (vah_5m - price >= min_space_5m) or (rhigh_5m - price >= min_space_5m)
             is_macro_safe = (s_macro > -0.25)
@@ -656,20 +678,22 @@ class ETHPredictor:
                     custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
                 elif not is_macro_safe:
                     custom_5m_label = "⏳ 宏观利空承压·5M暂停接多观望"
+                elif is_bear_attacking_5m or cvd_5m["score"] < -0.25:
+                    custom_5m_label = "⏳ 5M空头下杀中·暂停接多观望"
                 else:
                     custom_5m_label = "⏳ 1H顺势看涨·5M脉冲观望(等待回踩)"
                 composite_5m = 0.05
         elif strategic_1h == "DOWN":
             # -----------------------------------------------------------------
-            # 1H 战略看空 (如 1H 顶部接空)：5M 专职寻找反弹阻力的极佳接空入场点
+            # 1H 战略看空：5M 寻找反弹阻力接空入场点 (拉升途中严禁盲目摸顶，保持观望)
             # -----------------------------------------------------------------
             is_near_poc = abs(price - poc_5m) <= (atr_5m * 0.8)
             is_near_vah = price >= (vah_5m - atr_5m * 0.8)
             is_near_vwap = vwap_ext_5m["current_z"] >= -0.3
-            is_wick_exhaustion = (upper_wick_ratio >= 0.25 and pct_b_5m >= 0.65) or (exhaustion_penalty < -0.2) or (s_cross_abs <= -0.35) or is_pinbar_top
+            is_wick_exhaustion = (upper_wick_ratio >= 0.25 and pct_b_5m >= 0.65) or (exhaustion_penalty < -0.2) or is_pinbar_top
 
             is_rally_ready = (is_near_poc or is_near_vah or is_near_vwap or is_wick_exhaustion)
-            is_flow_healthy = (cvd_5m["score"] <= 0.35) and (s_oi_5m <= 0.35) and (s_cross_mom <= 0.45)
+            is_flow_healthy = (cvd_5m["score"] <= 0.25) and (s_oi_5m <= 0.25) and (not is_bull_attacking_5m)
             # 空间核验：向下至支撑区需至少具备可用波段空间，严禁砸在地板上接空
             has_downward_space = (price - val_5m >= min_space_5m) or (price - rlow_5m >= min_space_5m)
             is_macro_safe = (s_macro < 0.25)
@@ -685,6 +709,8 @@ class ETHPredictor:
                     custom_5m_label = f"⏳ 5M空间不足{min_space_5m:.1f}点·不做判断"
                 elif not is_macro_safe:
                     custom_5m_label = "⏳ 宏观利好支撑·5M暂停接空观望"
+                elif is_bull_attacking_5m or cvd_5m["score"] > 0.25:
+                    custom_5m_label = "⏳ 5M多头推升中·暂停接空观望"
                 else:
                     custom_5m_label = "⏳ 1H顺势看跌·5M下探观望(等待反弹)"
                 composite_5m = -0.05
@@ -696,22 +722,22 @@ class ETHPredictor:
             has_box_down_space = (price - val_5m >= min_space_5m) or (price - rlow_5m >= min_space_5m)
             box_width = max(vah_5m - val_5m, rhigh_5m - rlow_5m)
 
-            # 核心过滤：杜绝在单边阴跌途中把浮动下移的 val_5m 当成底部连续接飞刀
-            is_bleeding_downtrend = (cvd_5m.get("score", 0) < -0.25 and lower_wick_ratio < 0.25 and pct_b_5m < 0.20)
-            is_bleeding_uptrend = (cvd_5m.get("score", 0) > 0.25 and upper_wick_ratio < 0.25 and pct_b_5m > 0.80)
+            # 核心过滤：杜绝在单边阴跌途中把浮动下移的 val_5m 当成底部连续接飞刀，或在单边拉升途中把 vah 当顶
+            is_bleeding_downtrend = (cvd_5m.get("score", 0) < -0.20 and lower_wick_ratio < 0.25 and pct_b_5m < 0.25) or is_bear_attacking_5m
+            is_bleeding_uptrend = (cvd_5m.get("score", 0) > 0.20 and upper_wick_ratio < 0.25 and pct_b_5m > 0.75) or is_bull_attacking_5m
 
             # 底部有效信号：必须具备拒绝下探形态 (明显下影线、吸收背离或极值超卖)
             is_valid_bottom = (
                 (price <= val_5m + 0.8 or price <= rlow_5m + 0.8) and
                 (not is_bleeding_downtrend) and
-                (lower_wick_ratio >= 0.30 or exhaustion_penalty > 0.20 or s_cross_abs >= 0.32 or is_pinbar_bottom)
+                (lower_wick_ratio >= 0.28 or exhaustion_penalty > 0.20 or is_pinbar_bottom)
             )
 
             # 顶部有效信号：必须具备拒绝冲高形态 (明显上影线、动能衰竭或极值超买)
             is_valid_top = (
                 (price >= vah_5m - 0.8 or price >= rhigh_5m - 0.8) and
                 (not is_bleeding_uptrend) and
-                (upper_wick_ratio >= 0.30 or exhaustion_penalty < -0.20 or s_cross_abs <= -0.32 or is_pinbar_top)
+                (upper_wick_ratio >= 0.28 or exhaustion_penalty < -0.20 or is_pinbar_top)
             )
 
             if is_valid_bottom:
@@ -1021,16 +1047,28 @@ class ETHPredictor:
             target_range = "--"
             expected_change_pct = 0.0
 
-        # 空间门槛硬核核验 (用户明确要求：5M判断行情上涨或下跌大于等于6才出单，不然保持观望！1H>=30, 1D>=60)：
-        # 若盘面真实波段空间（至 TP1 或 TP2）达不到空间门槛，坚决判定为 NEUTRAL 观望，绝不出单！
+        # 空间门槛硬核核验 (用户原则 1：判断行情上涨或下跌空间不足 6 点不做判断，1H>=15点, 1D>=60点)：
+        # 若盘面真实波段空间达不到空间门槛，坚决判定为 NEUTRAL 观望，绝不出单！
         if direction == "UP":
             avail_space = max(tp1 - price, tp2 - price)
+            # 真实阻力压头拦截：若现价距离近端强阻力(VAH/RangeHigh)不足 min_space_req 点且非放量突破，坚决不做判断
+            overhead_barriers = [x for x in [vah, rhigh] if x and x > price]
+            if overhead_barriers:
+                dist_to_resist = min(overhead_barriers) - price
+                if 0 < dist_to_resist < min_space_req and not is_floor_long and custom_direction != "UP":
+                    avail_space = 0.0  # 压在阻力下方空间不足，拦截
         elif direction == "DOWN":
             avail_space = max(price - tp1, price - tp2)
+            # 真实支撑托底拦截：若现价距离近端强支撑(VAL/RangeLow)不足 min_space_req 点且非放量破位，坚决不做判断
+            floor_barriers = [x for x in [val, rlow] if x and x < price]
+            if floor_barriers:
+                dist_to_support = price - max(floor_barriers)
+                if 0 < dist_to_support < min_space_req and not is_ceiling_short and custom_direction != "DOWN":
+                    avail_space = 0.0  # 砸在支撑上方空间不足，拦截
         else:
             avail_space = 0.0
 
-        if direction in ("UP", "DOWN") and avail_space < min_space_req:
+        if direction in ("UP", "DOWN") and (avail_space < min_space_req or abs(tp1 - price) < 3.5):
             direction = "NEUTRAL"
             dir_icon = "⏸️"
             dir_label = f"空间不足{min_space_req:.0f}点·不做判断"

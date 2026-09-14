@@ -245,22 +245,24 @@ class PredictionLifecycleManager:
         is_bottom_reversal = ("底部" in dir_lbl_str or "见底" in dir_lbl_str)
         is_top_reversal = ("顶部" in dir_lbl_str or "见顶" in dir_lbl_str)
 
-        if direction == "UP" and regime in ("BEAR_ATTACK", "LONG_FLUSH") and not is_bottom_reversal:
+        if direction == "UP" and regime in ("BEAR_ATTACK", "LONG_FLUSH"):
+            # 空头强攻或多头踩踏中，严禁开多 (即使是反转标签也严禁顶着抛盘瀑布开多)
             return False
-        if direction == "DOWN" and regime in ("BULL_ATTACK", "SHORT_SQUEEZE") and not is_top_reversal:
+        if direction == "DOWN" and regime in ("BULL_ATTACK", "SHORT_SQUEEZE"):
+            # 多头强攻或空头逼空中，严禁开空 (即使是反转标签也严禁顶着多头拉升开空)
             return False
 
-        # 5. 层级共振对齐 (Hierarchical Alignment): 杜绝小周期与大周期打架
+        # 5. 层级共振对齐 (Hierarchical Alignment): 杜绝小周期与大周期打架，但允许突破放量顺势
         if tf == "5m":
             act_1h = self.active_predictions.get("1h")
             dir_1h = act_1h.get("direction") if (act_1h and act_1h.get("status") == "ACTIVE") else None
             if dir_1h == "UP" and direction == "DOWN":
-                # 1H 处于顺势看多时，5M 严禁顺手开空，除非触发顶部衰竭反转
-                if score > -0.32 and not is_top_reversal:
+                # 1H 处于顺势看多时，5M 严禁顺手开空，除非触发高置信度见顶
+                if score > -0.40:
                     return False
             elif dir_1h == "DOWN" and direction == "UP":
-                # 1H 处于顺势看空时，5M 严禁顺手开多，除非触发底部恐慌见底反转
-                if score < 0.32 and not is_bottom_reversal:
+                # 1H 处于顺势看空时，5M 允许放量突破追多，但严禁普通盲目接飞刀
+                if score < 0.40 and "突破" not in dir_lbl_str:
                     return False
 
         # 6. 空间门槛硬核校验 (自适应周内活跃日大波段 vs 周末休息日小波段)
@@ -1108,9 +1110,8 @@ class PredictionLifecycleManager:
         if pred_id:
             self.storage.update_prediction(pred_id, verified_result, act_obj=act)
 
-        # 设置冷却观望时长 (偏离终止或止损时多观望防晃动磨损)
-        cooldown_map = {"5m": 60, "1h": 300, "1d": 1200}
-        cooldown_sec = cooldown_map.get(tf, 60) if outcome in ("DEVIATION_STOP", "SL_FAILED") else 15
+        # 设置冷却观望时长 (用户明确指示：不需要冷却机制，方便日后发现问题提高准确率)
+        cooldown_sec = 5  # 极简心跳 5 秒，不设人为长冷却锁死
 
         # 转入 WAITING_SETUP 观望状态
         self.active_predictions[tf] = self._build_waiting_setup_state(
