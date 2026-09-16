@@ -62,6 +62,7 @@ INTERCEPT_PATTERNS = [
     r"liquidation/map",
     r"heatmap.*liquidation",
     r"liquidation.*heatmap",
+    r"exliqmap",
 ]
 
 # ============== 日志 ==============
@@ -653,25 +654,49 @@ async def intercept_coinglass_heatmap(config: dict):
         # CoinGlass API 返回加密 data 字段，前端解密后必然经过 JSON.parse
         await context.add_init_script(JSON_PARSE_HOOK_JS)
 
-        # 加载登录 cookies (清算地图非 BTC 币种需要登录态)
-        cookies_file = Path(config.get("cookies_file") or "")
-        if cookies_file and cookies_file.exists():
-            try:
-                auth = json.loads(cookies_file.read_text(encoding="utf-8"))
-                cookies = auth.get("cookies", [])
-                if cookies:
-                    await context.add_cookies(cookies)
-                    log.info(f"已加载登录态: {cookies_file} ({len(cookies)} cookies)")
-            except Exception as e:
-                log.warning(f"加载 cookies 失败: {e}")
-        else:
-            log.warning(f"cookies 文件不存在: {cookies_file} (非 BTC 币种可能抓不到)")
+        # 加载登录 cookies (优先顺序: 指定文件 > coinglass_manual.json > coinglass_auth.json)
+        cookies_candidates = []
+        if config.get("cookies_file"):
+            cookies_candidates.append(Path(config["cookies_file"]))
+        cookies_candidates.extend([
+            Path("coinglass_manual.json"),
+            Path.home() / "coinglass_manual.json",
+            Path("coinglass_auth.json"),
+            Path(__file__).parent / "coinglass_manual.json",
+            Path(__file__).parent / "coinglass_auth.json",
+        ])
+
+        loaded_cookies = False
+        for cfile in cookies_candidates:
+            if cfile.exists():
+                try:
+                    auth = json.loads(cfile.read_text(encoding="utf-8"))
+                    cookies = auth if isinstance(auth, list) else auth.get("cookies", [])
+                    if cookies:
+                        await context.add_cookies(cookies)
+                        log.info(f"已加载登录态: {cfile} ({len(cookies)} cookies)")
+                        loaded_cookies = True
+                        break
+                except Exception as e:
+                    log.warning(f"加载 cookies 失败 ({cfile}): {e}")
+
+        if not loaded_cookies:
+            log.warning("未找到有效 cookies 文件 (非 BTC 币种可能需要登录态)")
 
         page = await context.new_page()
+        code_40000_detected = False
 
         async def on_response(response: Response):
-            nonlocal captured_count
+            nonlocal captured_count, code_40000_detected
             url = response.url
+            if "exLiqMap" in url or "liqHeatMap" in url or "topPosition" in url:
+                try:
+                    text = await response.text()
+                    if '"code":"40000"' in text or '"code": "40000"' in text:
+                        code_40000_detected = True
+                        log.warning(f"[登录态阻断] 接口返回 code=40000: CoinGlass 需要登录才能获取非 BTC 币种数据！({url[:90]})")
+                except Exception:
+                    pass
             if not url_matches(url):
                 return
             if response.status != 200:
@@ -695,41 +720,38 @@ async def intercept_coinglass_heatmap(config: dict):
         url = config["url"]
         log.info(f"正在加载页面: {url}")
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=120000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         except PlaywrightTimeoutError:
-            log.warning("页面加载超时，继续等待网络请求...")
+            log.warning("页面加载超时，继续...")
 
-        # 关闭 Cookie 同意弹窗 (延迟弹出, 轮询最多 25s)
-        await dismiss_consent_dialog(page)
+        # 立即清除 Cookie 与遮罩弹窗 (不再漫长轮询)
+        await dismiss_consent_dialog(page, wait_sec=6)
+        await asyncio.sleep(2)
 
         # 检测 Cloudflare 验证页
         await detect_cloudflare(page)
 
-        # 等待 networkidle (初次加载会拉默认 BTC 的数据)
-        log.info("等待 networkidle...")
-        try:
-            await page.wait_for_load_state("networkidle", timeout=30000)
-        except PlaywrightTimeoutError:
-            log.info("networkidle 未达成，继续等待显式时长...")
-
-        log.info(f"再等待 {config['wait_seconds']}s 收集后续请求...")
-        await asyncio.sleep(config["wait_seconds"])
-
-        # LiquidationMap 页面默认加载 BTC，URL 参数无效
-        # 切换「交易所清算地图」(聚合图) 的币种选择器触发新数据请求
+        # 立即切换币种，无需等待默认 BTC 的漫长加载
         target_symbol = config["symbol"].upper()
-        await switch_agg_symbol(page, target_symbol)
-        await asyncio.sleep(5)
+        if target_symbol != "BTC":
+            await switch_agg_symbol(page, target_symbol)
+
+        # 等待数据返回
+        log.info("等待数据返回...")
+        await asyncio.sleep(8)
 
         # 检索 JSON.parse hook 拦截的数据 (按目标币种过滤)
         hook_count = await retrieve_captured_data(page, output_dir, symbol=target_symbol)
 
-        # 兜底: 重试切换
-        if hook_count == 0:
+        # 兜底: 如果没抓到且未检测到 40000，重试一次切换
+        if hook_count == 0 and not code_40000_detected:
             log.warning("未抓到目标币种数据，重试切换...")
             await switch_agg_symbol(page, target_symbol)
-            await asyncio.sleep(15)
+            await asyncio.sleep(10)
             hook_count = await retrieve_captured_data(page, output_dir, symbol=target_symbol)
+
+        if code_40000_detected and hook_count == 0:
+            log.error(f"CoinGlass 提示需要登录 (code 40000)，币种 {target_symbol} 无法获取数据，请更新 coinglass_manual.json 的 cookies！")
 
         await context.close()
         await browser.close()
@@ -962,51 +984,52 @@ async def detect_cloudflare(page):
         pass
 
 
-async def dismiss_consent_dialog(page, wait_sec: float = 25):
-    """关闭 Cookie 同意弹窗 (FundingChoices fc-consent-root)
+async def dismiss_consent_dialog(page, wait_sec: float = 6):
+    """关闭 Cookie 同意弹窗与遮罩层 (支持 Termly / FundingChoices / MuiModal)
 
-    弹窗的全屏遮罩 (fc-dialog-overlay) 会拦截所有点击, 导致币种切换失败。
-    弹窗通常在页面加载后延迟数秒出现, 这里轮询等待并处理;
-    优先点击拒绝/同意按钮, 兜底直接移除遮罩 DOM。
+    全屏遮罩 (termly, fc-dialog-overlay, MuiModal-backdrop) 会拦截点击, 导致币种切换失败。
+    轮询检测并彻底移除遮罩 DOM。
     """
     deadline = asyncio.get_event_loop().time() + wait_sec
     handled = False
     while asyncio.get_event_loop().time() < deadline:
         try:
             result = await page.evaluate("""() => {
-                const root = document.querySelector('.fc-consent-root');
-                if (!root) return null;
-                const btns = [...root.querySelectorAll('button')];
-                const reject = btns.find(b => /reject|deny|refuse|拒绝/i
-                    .test(b.getAttribute('aria-label') || b.innerText || ''));
-                const accept = btns.find(b => /accept|agree|consent|接受|同意/i
-                    .test(b.getAttribute('aria-label') || b.innerText || ''));
-                if (reject) { reject.click(); return 'reject'; }
-                if (accept) { accept.click(); return 'accept'; }
-                root.remove();
-                return 'removed';
+                let action = null;
+                // 1. 移除 Termly 隐私合规弹窗
+                const termly = document.querySelectorAll('#termly-code-snippet-support, [data-termly-part], [class*="termly"]');
+                if (termly.length > 0) {
+                    termly.forEach(el => el.remove());
+                    action = 'termly_removed';
+                }
+
+                // 2. 移除 Google FundingChoices 弹窗
+                const fc = document.querySelectorAll('.fc-consent-root, .fc-dialog-overlay');
+                if (fc.length > 0) {
+                    fc.forEach(el => el.remove());
+                    action = action || 'fc_removed';
+                }
+
+                // 3. 移除 Mui 全屏 Backdrop 遮罩 (避免拦截 pointer-events)
+                const backdrops = document.querySelectorAll('.MuiModal-backdrop, .MuiBackdrop-root, [class*="Backdrop"]');
+                if (backdrops.length > 0) {
+                    backdrops.forEach(b => b.remove());
+                    action = action || 'backdrop_removed';
+                }
+
+                document.body.style.overflow = 'auto';
+                return action;
             }""")
             if result:
-                log.info(f"Cookie 同意弹窗已处理: {result}")
-                await asyncio.sleep(1)
-                still = await page.evaluate(
-                    "() => !!document.querySelector('.fc-dialog-overlay, .fc-consent-root')")
-                if not still:
-                    return True
+                log.info(f"遮罩弹窗已清除: {result}")
                 handled = True
+                break
         except Exception:
             pass
-        if handled:
-            # 已处理过一次但遮罩仍在, 再等待后重试
-            await asyncio.sleep(2)
-            continue
-        await asyncio.sleep(1)
-    # 最终兜底: 强制移除
+        await asyncio.sleep(0.5)
+
     try:
-        await page.evaluate("""() => {
-            document.querySelectorAll('.fc-consent-root, .fc-dialog-overlay')
-                .forEach(e => e.remove());
-        }""")
+        await page.evaluate("() => { document.body.style.overflow = 'auto'; }")
     except Exception:
         pass
     return handled
@@ -1016,16 +1039,17 @@ async def switch_agg_symbol(page, symbol: str):
     """
     切换「交易所清算地图」(币种聚合图, exLiqMap) 的币种选择器
 
-    LiquidationMap 页面结构 (经 DOM 诊断确认):
-    - combobox[0]: 交易对选择器 (如 'Binance BTC/USDT Perpetual') → 第一张图
-    - combobox[1]: 聚合图币种选择器 (如 'BTC') → 「XX Exchange Liquidation Map」
+    LiquidationMap 页面结构:
+    - combobox[0]: 交易对选择器 (如 'Binance BTC/USDT Perpetual')
+    - combobox[1]: 聚合图币种选择器 (如 'BTC')
     - combobox[2]: Hyperliquid 图币种选择器 (如 'BTC')
-
-    币种选择器特征: value 为纯币种符号 (如 'BTC'/'ETH')，
-    区别于交易对选择器 (含 '/' 和 'Perpetual')
     """
     target = symbol.upper()
     log.info(f"开始切换聚合图币种到 {target}")
+
+    # 清除遮罩
+    await dismiss_consent_dialog(page, wait_sec=3)
+    await asyncio.sleep(1)
 
     boxes = page.locator("input.MuiAutocomplete-input[role='combobox']")
     n = await boxes.count()
@@ -1033,7 +1057,6 @@ async def switch_agg_symbol(page, symbol: str):
     for i in range(n):
         try:
             val = await boxes.nth(i).input_value()
-            # 纯币种符号 (无 '/' 与 'Perpetual'，长度短)
             if val and "/" not in val and "Perpetual" not in val and 1 < len(val.strip()) <= 12:
                 coin_boxes.append(i)
         except Exception:
@@ -1043,41 +1066,44 @@ async def switch_agg_symbol(page, symbol: str):
         log.warning("未找到聚合图币种选择器")
         return False
 
-    # 第一个币种选择器 = 聚合图 (页面自上而下)
     box = boxes.nth(coin_boxes[0])
     try:
-        await dismiss_consent_dialog(page, wait_sec=3)  # 点击前清除弹窗遮罩
-        await box.click(timeout=5000)
-        await asyncio.sleep(1)
+        await page.evaluate("""() => {
+            document.querySelectorAll('#termly-code-snippet-support, [data-termly-part], [class*="termly"], .MuiModal-backdrop, .MuiBackdrop-root').forEach(e => e.remove());
+            document.body.style.overflow = 'auto';
+        }""")
+
+        await box.click(force=True, timeout=5000)
+        await asyncio.sleep(0.8)
         await page.keyboard.press("Control+a")
         await page.keyboard.press("Delete")
-        await asyncio.sleep(0.3)
-        try:
-            await box.fill(target, timeout=3000)
-        except Exception:
-            await page.keyboard.type(target)
+        await asyncio.sleep(0.5)
+        await box.fill(target)
         await asyncio.sleep(1.5)
+
         clicked = await page.evaluate(f"""() => {{
             const opts = document.querySelectorAll('.MuiAutocomplete-option, [role="option"]');
             const target = '{target}';
-            // 优先精确等于 target 的选项，其次以 target 开头
-            let fallback = null;
             for (const opt of opts) {{
                 const text = (opt.textContent || '').trim();
                 if (text === target) {{ opt.click(); return text; }}
-                if (!fallback && (text.startsWith(target + ' ') || text.startsWith(target + '('))) {{
-                    fallback = opt;
+            }}
+            for (const opt of opts) {{
+                const text = (opt.textContent || '').trim();
+                if (text.startsWith(target + ' ') || text.startsWith(target + '(')) {{
+                    opt.click(); return text;
                 }}
             }}
-            if (fallback) {{ fallback.click(); return fallback.textContent.trim(); }}
             return null;
         }}""")
+
         if clicked:
-            log.info(f"点击了选项: {clicked}")
+            log.info(f"点击了下拉匹配选项: {clicked}")
         else:
             await page.keyboard.press("Enter")
-            log.info("按 Enter 确认币种选择")
-        await asyncio.sleep(10)
+            log.info("按 Enter 确认币种输入")
+
+        await asyncio.sleep(5)
         log.info(f"聚合图币种切换完成: {target}")
         return True
     except Exception as e:

@@ -261,7 +261,7 @@ class PredictionLifecycleManager:
                 if score < 0.40 and "突破" not in dir_lbl_str:
                     return False
 
-        # 6. 空间门槛硬核校验 (自适应周内活跃日大波段 vs 周末休息日小波段)
+        # 6. 空间门槛硬核校验 (严格贯彻“低于6点等待，大级别18/50点等待”原则)
         if direction in ("UP", "DOWN"):
             is_wk = raw_pred.get("is_weekend")
             if is_wk is None:
@@ -272,13 +272,17 @@ class PredictionLifecycleManager:
                     dt = datetime.now(TZ_BJT)
                 is_wk = (dt.weekday() in (5, 6))
 
-            default_space = 6.0 if tf == "5m" else ((15.0 if is_wk else 20.0) if tf == "1h" else 60.0)
-            req_space = max(6.0 if tf == "5m" else 12.0, safe_float(raw_pred.get("min_space_req", default_space)))
+            default_space = 6.0 if tf == "5m" else ((18.0 if is_wk else 22.0) if tf == "1h" else 60.0)
+            req_space = max(6.0 if tf == "5m" else 18.0, safe_float(raw_pred.get("min_space_req", default_space)))
             base_p = safe_float(raw_pred.get("base_price", 0.0))
             tp1_p = safe_float(raw_pred.get("tp1", 0.0))
             tp2_p = safe_float(raw_pred.get("tp2", 0.0))
             max_space = max(abs(tp1_p - base_p), abs(tp2_p - base_p)) if base_p > 0 else 0.0
-            if max_space < (req_space - 0.05) or "空间不足" in str(raw_pred.get("dir_label", "")):
+            tp1_dist = abs(tp1_p - base_p) if base_p > 0 else 0.0
+
+            # 用户核心铁律：5M 涨跌低于 6 点坚决等待；大级别严格要求 18/50 点门禁
+            min_tp1_req = 5.5 if tf == "5m" else (14.0 if tf == "1h" else 35.0)
+            if max_space < (req_space - 0.05) or tp1_dist < min_tp1_req or "空间不足" in str(raw_pred.get("dir_label", "")):
                 return False
 
         # 7. 宏观对冲门禁 (防止开单 3 分钟即被宏观利空/利好核验偏离秒杀)
@@ -319,7 +323,21 @@ class PredictionLifecycleManager:
                 continue
 
             # 检验是否具备明确的量仓与指标强共振开仓条件
-            if self._is_setup_ready(tf, raw_pred, market_snapshot, act):
+            setup_ready = self._is_setup_ready(tf, raw_pred, market_snapshot, act)
+
+            # 大单边突破紧急唤醒机制：解决大行情在 WAITING_SETUP 沉睡踏空的问题
+            if not setup_ready and tf in ("1h", "1d") and raw_pred.get("direction") in ("UP", "DOWN"):
+                vol_oi_chk = market_snapshot.get("volume_oi") or {}
+                regime_chk = vol_oi_chk.get("regime", "")
+                dir_p = raw_pred.get("direction")
+                is_breakout_attack = (dir_p == "DOWN" and regime_chk == "BEAR_ATTACK") or (dir_p == "UP" and regime_chk == "BULL_ATTACK")
+                tp1_dist = abs(safe_float(raw_pred.get("tp1", 0)) - price)
+                req_sp = 15.0 if tf == "1h" else 45.0
+                if is_breakout_attack and tp1_dist >= req_sp and "空间不足" not in str(raw_pred.get("dir_label", "")):
+                    print(f"[Lifecycle] ⚡ [{tf}] 大单边突破紧急唤醒！({dir_p} | Regime={regime_chk} | 空间={tp1_dist:.1f}U >= {req_sp}U) 打破沉睡立即开单！", flush=True)
+                    setup_ready = True
+
+            if setup_ready:
                 self._initialize_new_prediction(tf, raw_pred, price)
             elif not act or act.get("status") != "WAITING_SETUP":
                 # 未达开仓条件且尚无等待结构，进入观望等待状态
@@ -502,51 +520,20 @@ class PredictionLifecycleManager:
             favorable_move = (check_high - base_px) if direction == "UP" else (base_px - check_low)
             cur_pnl_pct = round(((current_price - base_px) / base_px * 100.0), 3) if direction == "UP" else round(((base_px - current_price) / base_px * 100.0), 3)
 
-            # 顺向打出 2.8 点以上或者已达成 TP1，或者处于盈利状态，均允许触发动能衰竭提早锁定收割
-            has_profit_cushion = (favorable_move >= 2.8) or (act.get("tp1_status") == "REACHED") or (cur_pnl_pct >= 0.08)
+            # 严格分周期安全垫隔离：绝不能拿 5M 的微小位移去判定 1H 和 1D！
+            # 5M: 必须顺向打出 >= 6.0 点（或达成 TP1）才允许提前收割
+            # 1H: 必须顺向打出 >= 18.0 点（或达成 TP1），严禁2个点收割
+            # 1D: 必须顺向打出 >= 50.0 点（或达成 TP1），严禁2个点收割
+            min_cushion_pts = 6.0 if tf == "5m" else (18.0 if tf == "1h" else 50.0)
+            has_profit_cushion = (favorable_move >= min_cushion_pts) or (act.get("tp1_status") == "REACHED")
 
-            exhaust_info = calc_momentum_exhaustion(kl_5m_chk, kl_1h_chk, vol_oi_data, direction=direction, klines_15m=kl_15m_chk)
+            exhaust_info = calc_momentum_exhaustion(kl_5m_chk, kl_1h_chk, vol_oi_data, direction=direction, klines_15m=kl_15m_chk, tf=tf)
+            accel_info = calc_breakout_acceleration(kl_5m_chk, kl_1h_chk, vol_oi_data, macro_ev, direction=direction, klines_15m=kl_15m_chk)
+            is_accelerating = accel_info.get("is_accelerating", False)
 
-            # 分支 1: 动能衰竭中途/终局收割结案 (Exhaustion Finalize - 用户原则: 2400到2350趋势没了即结束)
-            if has_profit_cushion and exhaust_info.get("is_exhausted"):
-                reason_str = f"🏁 动能衰竭收割 · 利润锁定结案: {'; '.join(exhaust_info.get('reasons', []))}"
-                print(f"[Lifecycle] 🏁 [{tf}] {reason_str}", flush=True)
-                self._finalize_prediction(
-                    tf=tf,
-                    act=act,
-                    current_price=current_price,
-                    outcome="EXHAUSTION_WIN",
-                    is_win=True,
-                    tp1_hit=(act.get("tp1_status") == "REACHED" or favorable_move >= 3.5),
-                    tp2_hit=(act.get("tp2_status") == "REACHED"),
-                    sl_hit=act.get("sl_breached", False),
-                    accuracy_score=0.90 if act.get("tp1_status") != "REACHED" else 1.0,
-                    reason=reason_str,
-                    market_snapshot=market_snapshot
-                )
-
-                # 用户问题 3 确认：突变行情无缝翻转 (如衰竭后盘口直接出现反向强攻大单或大阳/大阴突破)
-                reverse_dir = "UP" if direction == "DOWN" else "DOWN"
-                morph_chk = exhaust_info.get("morph_15m") or exhaust_info.get("morph_5m") or {}
-                is_opp_surge = False
-                if reverse_dir == "UP" and (morph_chk.get("is_bull") and morph_chk.get("body_pct", 0) >= 60.0):
-                    is_opp_surge = True
-                elif reverse_dir == "DOWN" and (morph_chk.get("is_bear") and morph_chk.get("body_pct", 0) >= 60.0):
-                    is_opp_surge = True
-
-                oi_opp = (vol_oi_data.get("regime") == "BULL_ATTACK" and reverse_dir == "UP") or (vol_oi_data.get("regime") == "BEAR_ATTACK" and reverse_dir == "DOWN")
-                if is_opp_surge or oi_opp:
-                    flip_reason = f"⚡ 趋势衰竭后盘口突变反转行情({reverse_dir})，触发无缝翻转开单提示！"
-                    print(f"[Lifecycle] ⚡ [{tf}] {flip_reason}", flush=True)
-                    forced_pred = self.predictor.build_forced_prediction(tf, reverse_dir, current_price, market_snapshot)
-                    self._initialize_new_prediction(tf, forced_pred, current_price)
-                    self._save_active()
-                continue
-
-            # 分支 2: 目标带突破加速顺势延展 (Breakout Roll Target)
-            if is_in_target_zone or act.get("tp2_status") == "REACHED":
-                accel_info = calc_breakout_acceleration(kl_5m_chk, kl_1h_chk, vol_oi_data, macro_ev, direction=direction, klines_15m=kl_15m_chk)
-                if accel_info.get("is_accelerating") and not exhaust_info.get("is_exhausted"):
+            # 分支 1: 目标带突破加速顺势延展 (Breakout Roll Target) - 优先级高于微观局部衰竭！
+            if (is_in_target_zone or act.get("tp2_status") == "REACHED" or (act.get("tp1_status") == "REACHED" and is_accelerating)):
+                if is_accelerating:
                     ext_targets = act.get("extended_targets") or []
                     next_tp = None
                     if direction == "DOWN":
@@ -597,6 +584,41 @@ class PredictionLifecycleManager:
                         market_snapshot=market_snapshot
                     )
                     continue
+
+            # 分支 2: 动能真实衰竭终局收割结案 (Exhaustion Finalize) - 必须打出充足安全垫且未处于加速突破中
+            if has_profit_cushion and exhaust_info.get("is_exhausted") and not is_accelerating:
+                reason_str = f"🏁 动能衰竭收割 · 利润锁定结案: {'; '.join(exhaust_info.get('reasons', []))}"
+                print(f"[Lifecycle] 🏁 [{tf}] {reason_str}", flush=True)
+                self._finalize_prediction(
+                    tf=tf,
+                    act=act,
+                    current_price=current_price,
+                    outcome="EXHAUSTION_WIN",
+                    is_win=True,
+                    tp1_hit=(act.get("tp1_status") == "REACHED" or favorable_move >= min_cushion_pts),
+                    tp2_hit=(act.get("tp2_status") == "REACHED"),
+                    sl_hit=act.get("sl_breached", False),
+                    accuracy_score=0.90 if act.get("tp1_status") != "REACHED" else 1.0,
+                    reason=reason_str,
+                    market_snapshot=market_snapshot
+                )
+
+                # 突变行情无缝翻转 (如衰竭后盘口直接出现反向强攻大单或大阳/大阴突破)
+                reverse_dir = "UP" if direction == "DOWN" else "DOWN"
+                morph_chk = exhaust_info.get("morph_15m") or exhaust_info.get("morph_5m") or {}
+                is_opp_surge = False
+                if reverse_dir == "UP" and (morph_chk.get("is_bull") and morph_chk.get("body_pct", 0) >= 60.0):
+                    is_opp_surge = True
+                elif reverse_dir == "DOWN" and (morph_chk.get("is_bear") and morph_chk.get("body_pct", 0) >= 60.0):
+                    is_opp_surge = True
+
+                oi_opp = (vol_oi_data.get("regime") == "BULL_ATTACK" and reverse_dir == "UP") or (vol_oi_data.get("regime") == "BEAR_ATTACK" and reverse_dir == "DOWN")
+                if is_opp_surge or oi_opp:
+                    flip_reason = f"⚡ 趋势衰竭后盘口突变反转行情({reverse_dir})，触发无缝翻转开单提示！"
+                    print(f"[Lifecycle] ⚡ [{tf}] {flip_reason}", flush=True)
+                    forced_pred = self.predictor.build_forced_prediction(tf, reverse_dir, current_price, market_snapshot)
+                    self._initialize_new_prediction(tf, forced_pred, current_price)
+                continue
 
             # 事件 A2: 保本止盈保护触发 (打满目标 1 后，价格回踩至开仓保本线或锁定防守线，锁定胜局退出，严禁由赢转亏)
             if act.get("tp1_status") == "REACHED" and act.get("trailing_be"):
@@ -1104,6 +1126,16 @@ class PredictionLifecycleManager:
             pnl_pct = round(((base_px - current_price) / base_px * 100.0), 3)
             mfe_pct = max(0.0, round(((base_px - lowest_seen) / base_px * 100.0), 3))
             mae_pct = max(0.0, round(((highest_seen - base_px) / base_px * 100.0), 3))
+
+        # 顺向最大波段空间硬核核验：若最大顺向位移连起步空间都没走出来，绝不能算为盈利赢单！
+        # 5M 需 >= 4.5 点，1H 需 >= 12.0 点，1D 需 >= 30.0 点
+        mfe_pts = (mfe_pct / 100.0) * base_px if base_px > 0 else 0.0
+        req_min_mfe = 4.5 if tf == "5m" else (12.0 if tf == "1h" else 30.0)
+        if is_win and mfe_pts < req_min_mfe and not tp1_hit:
+            is_win = False
+            accuracy_score = 0.0
+            outcome = "SCRATCH_FLAT"
+            reason = f"⚠️ 顺向最大波段空间不足({mfe_pts:.1f}U < {req_min_mfe}U)，判定为微幅杂波无效: {reason}"
 
         verified_result = {
             "verified_at": now_iso,

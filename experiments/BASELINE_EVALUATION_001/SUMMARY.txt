@@ -1,0 +1,41 @@
+EXPERIMENT_ID: BASELINE_EVALUATION_001
+CODE_VERSION: 2660ac2 / v2.5.2-asof-AUDIT_FIX_ASOF_001
+BASELINE_VERSION: NONE (establishing first baseline)
+DATA_AUDIT: PASS
+DATA_RANGE: 2026-08-22T13:45:28.756000+00:00 -> 2026-09-12T13:45:28.756000+00:00
+
+=== 5m ===
+IS Direction Accuracy: 74.92% (n=3628)
+OOS Direction Accuracy: 75.24% (n=2419)
+UP/DOWN/FLAT Acc (OOS, recall by actual): 16.67% / 18.42% / 76.9%
+Target Price Mean/Median Error % (OOS): 0.4395974219983992 / 0.3129544669328841
+Generalization Gap (IS-OOS dir acc): -0.32 pp
+Per-window OOS Direction Accuracy:
+  W1: 71.3% (n=1512)
+  W2: 79.5% (n=1512)
+  W3: 75.2% (n=1512)
+  W4: 74.21% (n=1512)
+
+=== 1h ===
+IS Direction Accuracy: 46.18% (n=301)
+OOS Direction Accuracy: 53.96% (n=202)
+UP/DOWN/FLAT Acc (OOS, recall by actual): 0.0% / 33.33% / 54.82%
+Target Price Mean/Median Error % (OOS): 1.6728082651416316 / 1.4273461395303757
+Generalization Gap (IS-OOS dir acc): -7.78 pp
+Per-window OOS Direction Accuracy:
+  W1: 55.56% (n=126)
+  W2: 39.68% (n=126)
+  W3: 39.68% (n=126)
+  W4: 61.9% (n=126)
+
+=== 1d ===
+IS Direction Accuracy: 33.33% (n=12)
+OOS Direction Accuracy: 50.0% (n=8)
+UP/DOWN/FLAT Acc (OOS, recall by actual): 0.0% / None% / 57.14%
+Target Price Mean/Median Error % (OOS): 3.2884449926077566 / 3.5752360182734213
+Generalization Gap (IS-OOS dir acc): -16.67 pp
+Per-window OOS Direction Accuracy:
+  W1: 40.0% (n=10)
+  W2: 40.0% (n=10)
+
+OVERFITTING ASSESSMENT: LOW

@@ -966,14 +966,14 @@ class ETHPredictor:
                 else:
                     dir_label = "看涨" if direction == "UP" else "看跌"
 
-        # 动态目标位置与结构失效线计算 (用户原则 1：5M 研判空间不足 6 点不做判断，1H>=15点, 1D>=60点)
-        min_space_req = max(6.0, safe_float(weights.get("min_directional_space", 6.0))) if tf == "5m" else safe_float(weights.get("min_directional_space", 15.0 if tf == "1h" else 60.0))
-        cfg_min_tp1 = weights.get("min_tp1_dist", 4.0 if tf == "5m" else (10.0 if tf == "1h" else 35.0))
-        cfg_min_tp2 = weights.get("min_tp2_dist", 7.5 if tf == "5m" else (20.0 if tf == "1h" else 60.0))
-        cfg_min_sl = weights.get("min_sl_dist", 4.5 if tf == "5m" else (10.0 if tf == "1h" else 22.0))
+        # 动态目标位置与结构失效线计算 (严格贯彻“低于6点等待，大级别18/50点等待”原则)
+        min_space_req = max(6.0, safe_float(weights.get("min_directional_space", 6.0))) if tf == "5m" else safe_float(weights.get("min_directional_space", 18.0 if tf == "1h" else 60.0))
+        cfg_min_tp1 = weights.get("min_tp1_dist", 5.5 if tf == "5m" else (18.0 if tf == "1h" else 50.0))
+        cfg_min_tp2 = weights.get("min_tp2_dist", 9.0 if tf == "5m" else (30.0 if tf == "1h" else 80.0))
+        cfg_min_sl = weights.get("min_sl_dist", 5.0 if tf == "5m" else (15.0 if tf == "1h" else 30.0))
 
         min_tp1_dist = max(atr * k_tp1 * 0.70, cfg_min_tp1)
-        min_tp2_step = max(round(atr * 0.40, 2), 1.8 if tf == "5m" else (6.0 if tf == "1h" else 20.0))
+        min_tp2_step = max(round(atr * 0.40, 2), 2.5 if tf == "5m" else (10.0 if tf == "1h" else 25.0))
         min_sl_dist = max(round(atr * 0.50, 2), cfg_min_sl)
 
         vp = volume_profile or {}
@@ -1149,7 +1149,8 @@ class ETHPredictor:
         else:
             avail_space = 0.0
 
-        if direction in ("UP", "DOWN") and (avail_space < min_space_req or abs(tp1 - price) < 3.5):
+        min_tp1_limit = 5.5 if tf == "5m" else (15.0 if tf == "1h" else 40.0)
+        if direction in ("UP", "DOWN") and (avail_space < min_space_req or abs(tp1 - price) < min_tp1_limit):
             direction = "NEUTRAL"
             dir_icon = "⏸️"
             dir_label = f"⏳ 空间不足{min_space_req:.1f}点·不做判断" if tf == "5m" else f"⏳ 空间不足{min_space_req:.0f}点·不做判断"

@@ -451,86 +451,150 @@ def calc_candlestick_morphology(klines, bar_index=-1):
     }
 
 
-def calc_momentum_exhaustion(klines_5m, klines_1h, vol_oi, direction="DOWN", klines_15m=None):
+def calc_momentum_exhaustion(klines_5m, klines_1h, vol_oi, direction="DOWN", klines_15m=None, tf="5m"):
     """
-    盘口动能衰竭与多头/空头出清力竭核验 (用户细节 2)：
-    1. 15M / 5M 出现长影线反抽 (长影线 >= 45%)
-    2. 持仓量 (OI) 发生大规模断崖式下降 (多头爆仓/空头去杠杆出清完毕，无新卖/买盘)
-    3. 成交量较急跌/急涨峰值大幅收缩 (萎缩至 35% 以下)
-    4. K 线进入小幅窄幅震荡 (<= 7.5U 振幅) 停滞不前
+    盘口动能衰竭与多头/空头出清力竭核验 (严格区分 5m / 1h / 1d，杜绝跨周期误杀)：
+    - 5m: 结合 15M/5M K线影线反抽 (长影线 >= 45%) 与近端缩量横盘
+    - 1h: 严格仅基于 1H K线自身长影线 (>= 50%) 与 1H 级别横盘停滞 (振幅 <= 15U)，严禁被 5M 影线秒杀
+    - 1d: 仅基于 1D 宏观反转或连续大级别逆势反转，绝不核验微观 5M/15M 影线
     """
     reasons = []
     vol_oi = vol_oi or {}
 
-    # 1. 影线核验：优先采用 15M K线判定长影线力竭 (结合 5M)
-    target_kl = klines_15m if (klines_15m and len(klines_15m) >= 1) else klines_5m
-    tf_name = "15M" if (klines_15m and len(klines_15m) >= 1) else "5M"
-
-    morph_cur = calc_candlestick_morphology(target_kl, -1)
-    morph_prev = calc_candlestick_morphology(target_kl, -2) if len(target_kl or []) >= 2 else morph_cur
-    morph_5m = calc_candlestick_morphology(klines_5m, -1)
-    morph_prev_5m = calc_candlestick_morphology(klines_5m, -2) if len(klines_5m or []) >= 2 else morph_5m
-
     pinbar_detected = False
-    if direction == "DOWN":
-        if morph_cur["is_pinbar_bottom"] or morph_prev["is_pinbar_bottom"]:
-            pinbar_detected = True
-            reasons.append(f"{tf_name}收出长下影线({morph_cur['lower_shadow_pct']}%)")
-        elif morph_5m["is_pinbar_bottom"] or morph_prev_5m["is_pinbar_bottom"]:
-            pinbar_detected = True
-            reasons.append(f"5M收出长下影线({morph_5m['lower_shadow_pct']}%)")
-    elif direction == "UP":
-        if morph_cur["is_pinbar_top"] or morph_prev["is_pinbar_top"]:
-            pinbar_detected = True
-            reasons.append(f"{tf_name}收出长上影线({morph_cur['upper_shadow_pct']}%)")
-        elif morph_5m["is_pinbar_top"] or morph_prev_5m["is_pinbar_top"]:
-            pinbar_detected = True
-            reasons.append(f"5M收出长上影线({morph_5m['upper_shadow_pct']}%)")
-
-    # 2. 持仓量出清核验 (出清意味着燃料耗尽)
-    oi_delta_1h = safe_float(vol_oi.get("oi_delta_1h", 0.0))
-    oi_flushed = False
-    if direction == "DOWN" and oi_delta_1h <= -2500:
-        oi_flushed = True
-        reasons.append(f"多头爆仓出清完毕(1H OI降幅 {oi_delta_1h:+.0f} ETH)")
-    elif direction == "UP" and oi_delta_1h <= -2500:
-        oi_flushed = True
-        reasons.append(f"空头挤压出清完毕(1H OI降幅 {oi_delta_1h:+.0f} ETH)")
-
-    # 3. 成交量萎缩核验 (近 3 根对比过去 24 根峰值)
     vol_contracted = False
-    if klines_5m and len(klines_5m) >= 12:
-        recent_vols = [safe_float(k[5]) for k in klines_5m[-3:]]
-        avg_recent_vol = sum(recent_vols) / len(recent_vols)
-        past_vols = [safe_float(k[5]) for k in klines_5m[-24:]]
-        max_past_vol = max(past_vols) if past_vols else 1.0
-        if max_past_vol > 0 and (avg_recent_vol / max_past_vol) <= 0.35:
-            vol_contracted = True
-            reasons.append(f"成交量断崖式萎缩(仅峰值 {(avg_recent_vol/max_past_vol*100):.0f}%)")
-
-    # 4. 小幅箱体横盘停滞 (近 4 根 5M 极差 <= 7.5U)
     tight_consolidation = False
-    if klines_5m and len(klines_5m) >= 4:
-        recent_highs = [safe_float(k[2]) for k in klines_5m[-4:]]
-        recent_lows = [safe_float(k[3]) for k in klines_5m[-4:]]
-        range_span = max(recent_highs) - min(recent_lows)
-        if range_span <= 7.5:
-            tight_consolidation = True
-            reasons.append(f"K线进入窄幅收敛整理(振幅仅 {range_span:.1f}U)")
+    morph_cur = None
+    morph_1h = None
 
-    # 综合判定：长影线直接判衰竭；或者 (OI出清 + 缩量 + 窄幅横盘) 判衰竭
-    is_exhausted = pinbar_detected or (oi_flushed and vol_contracted and tight_consolidation) or (pinbar_detected and tight_consolidation)
+    if tf == "1d":
+        # 1D 宏观周期：绝不因日内 5M/15M 的微观下影线而提前判衰竭，需要 1H 出现反向实体大阳/大阴或连续大幅反弹
+        if klines_1h and len(klines_1h) >= 2:
+            morph_1h = calc_candlestick_morphology(klines_1h, -1)
+            # 只有当 1H 走出反向大实体 (>= 75%) 时才提示 1D 可能衰竭
+            if direction == "DOWN" and morph_1h.get("is_bull") and morph_1h.get("body_pct", 0) >= 75.0:
+                pinbar_detected = True
+                reasons.append(f"1D追踪中遇1H反向强力大阳线反攻(实体 {morph_1h.get('body_pct'):.0f}%)")
+            elif direction == "UP" and morph_1h.get("is_bear") and morph_1h.get("body_pct", 0) >= 75.0:
+                pinbar_detected = True
+                reasons.append(f"1D追踪中遇1H反向强力大阴线杀跌(实体 {morph_1h.get('body_pct'):.0f}%)")
+        is_exhausted = pinbar_detected
+        return {
+            "is_exhausted": is_exhausted,
+            "pinbar_detected": pinbar_detected,
+            "oi_flushed": False,
+            "vol_contracted": False,
+            "tight_consolidation": False,
+            "reasons": reasons,
+            "morph_5m": None,
+            "morph_15m": None,
+            "morph_1h": morph_1h,
+        }
 
-    return {
-        "is_exhausted": is_exhausted,
-        "pinbar_detected": pinbar_detected,
-        "oi_flushed": oi_flushed,
-        "vol_contracted": vol_contracted,
-        "tight_consolidation": tight_consolidation,
-        "reasons": reasons,
-        "morph_5m": morph_5m,
-        "morph_15m": morph_cur if tf_name == "15M" else None,
-    }
+    elif tf == "1h":
+        # 1H 日内波段：严格以 1H K线自身为主，彻底杜绝 5M 影线误杀
+        target_kl = klines_1h if (klines_1h and len(klines_1h) >= 1) else klines_15m
+        if target_kl and len(target_kl) >= 1:
+            morph_cur = calc_candlestick_morphology(target_kl, -1)
+            morph_prev = calc_candlestick_morphology(target_kl, -2) if len(target_kl) >= 2 else morph_cur
+            if direction == "DOWN":
+                if morph_cur.get("is_pinbar_bottom") or morph_prev.get("is_pinbar_bottom") or (morph_cur.get("lower_shadow_pct", 0) >= 50.0):
+                    pinbar_detected = True
+                    reasons.append(f"1H收出显著长下影线({morph_cur.get('lower_shadow_pct'):.0f}%)")
+            elif direction == "UP":
+                if morph_cur.get("is_pinbar_top") or morph_prev.get("is_pinbar_top") or (morph_cur.get("upper_shadow_pct", 0) >= 50.0):
+                    pinbar_detected = True
+                    reasons.append(f"1H收出显著长上影线({morph_cur.get('upper_shadow_pct'):.0f}%)")
+
+        # 1H 持仓出清 (出清需显著)
+        oi_delta_1h = safe_float(vol_oi.get("oi_delta_1h", 0.0))
+        oi_flushed = (oi_delta_1h <= -4000)
+        if oi_flushed:
+            reasons.append(f"1H持仓量巨额出清(OI降幅 {oi_delta_1h:+.0f} ETH)")
+
+        # 1H 级别横盘停滞 (近 3 根 1H 振幅 <= 14U)
+        if klines_1h and len(klines_1h) >= 3:
+            h_span = max(safe_float(k[2]) for k in klines_1h[-3:]) - min(safe_float(k[3]) for k in klines_1h[-3:])
+            if h_span <= 14.0:
+                tight_consolidation = True
+                reasons.append(f"1H进入窄幅收敛整理(3H振幅仅 {h_span:.1f}U)")
+
+        is_exhausted = pinbar_detected or (oi_flushed and tight_consolidation)
+        return {
+            "is_exhausted": is_exhausted,
+            "pinbar_detected": pinbar_detected,
+            "oi_flushed": oi_flushed,
+            "vol_contracted": False,
+            "tight_consolidation": tight_consolidation,
+            "reasons": reasons,
+            "morph_5m": None,
+            "morph_15m": None,
+            "morph_1h": morph_cur,
+        }
+
+    else:
+        # 5m 极短线周期：采用 15M/5M 影线与短线成交量收缩核验
+        target_kl = klines_15m if (klines_15m and len(klines_15m) >= 1) else klines_5m
+        tf_name = "15M" if (klines_15m and len(klines_15m) >= 1) else "5M"
+
+        morph_cur = calc_candlestick_morphology(target_kl, -1)
+        morph_prev = calc_candlestick_morphology(target_kl, -2) if len(target_kl or []) >= 2 else morph_cur
+        morph_5m = calc_candlestick_morphology(klines_5m, -1)
+        morph_prev_5m = calc_candlestick_morphology(klines_5m, -2) if len(klines_5m or []) >= 2 else morph_5m
+
+        if direction == "DOWN":
+            if morph_cur["is_pinbar_bottom"] or morph_prev["is_pinbar_bottom"]:
+                pinbar_detected = True
+                reasons.append(f"{tf_name}收出长下影线({morph_cur['lower_shadow_pct']}%)")
+            elif morph_5m["is_pinbar_bottom"] or morph_prev_5m["is_pinbar_bottom"]:
+                pinbar_detected = True
+                reasons.append(f"5M收出长下影线({morph_5m['lower_shadow_pct']}%)")
+        elif direction == "UP":
+            if morph_cur["is_pinbar_top"] or morph_prev["is_pinbar_top"]:
+                pinbar_detected = True
+                reasons.append(f"{tf_name}收出长上影线({morph_cur['upper_shadow_pct']}%)")
+            elif morph_5m["is_pinbar_top"] or morph_prev_5m["is_pinbar_top"]:
+                pinbar_detected = True
+                reasons.append(f"5M收出长上影线({morph_5m['upper_shadow_pct']}%)")
+
+        oi_delta_1h = safe_float(vol_oi.get("oi_delta_1h", 0.0))
+        oi_flushed = False
+        if direction == "DOWN" and oi_delta_1h <= -2500:
+            oi_flushed = True
+            reasons.append(f"多头爆仓出清完毕(1H OI降幅 {oi_delta_1h:+.0f} ETH)")
+        elif direction == "UP" and oi_delta_1h <= -2500:
+            oi_flushed = True
+            reasons.append(f"空头挤压出清完毕(1H OI降幅 {oi_delta_1h:+.0f} ETH)")
+
+        if klines_5m and len(klines_5m) >= 12:
+            recent_vols = [safe_float(k[5]) for k in klines_5m[-3:]]
+            avg_recent_vol = sum(recent_vols) / len(recent_vols)
+            past_vols = [safe_float(k[5]) for k in klines_5m[-24:]]
+            max_past_vol = max(past_vols) if past_vols else 1.0
+            if max_past_vol > 0 and (avg_recent_vol / max_past_vol) <= 0.35:
+                vol_contracted = True
+                reasons.append(f"成交量断崖式萎缩(仅峰值 {(avg_recent_vol/max_past_vol*100):.0f}%)")
+
+        if klines_5m and len(klines_5m) >= 4:
+            recent_highs = [safe_float(k[2]) for k in klines_5m[-4:]]
+            recent_lows = [safe_float(k[3]) for k in klines_5m[-4:]]
+            range_span = max(recent_highs) - min(recent_lows)
+            if range_span <= 7.5:
+                tight_consolidation = True
+                reasons.append(f"K线进入窄幅收敛整理(振幅仅 {range_span:.1f}U)")
+
+        is_exhausted = pinbar_detected or (oi_flushed and vol_contracted and tight_consolidation) or (pinbar_detected and tight_consolidation)
+
+        return {
+            "is_exhausted": is_exhausted,
+            "pinbar_detected": pinbar_detected,
+            "oi_flushed": oi_flushed,
+            "vol_contracted": vol_contracted,
+            "tight_consolidation": tight_consolidation,
+            "reasons": reasons,
+            "morph_5m": morph_5m,
+            "morph_15m": morph_cur if tf_name == "15M" else None,
+        }
 
 
 def calc_breakout_acceleration(klines_5m, klines_1h, vol_oi, macro_events, direction="DOWN", klines_15m=None):

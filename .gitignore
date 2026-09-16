@@ -25,8 +25,10 @@ coinglass_manual.json
 # Runtime local data & captures
 data/*
 !data/models/
+data_test_btc/
 test_data/
 *.sqlite3
+*.pid
 
 # OS / IDE
 .DS_Store

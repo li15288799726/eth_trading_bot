@@ -1,0 +1,905 @@
+{
+  "EXPERIMENT_ID": "BASELINE_EVALUATION_001",
+  "CODE_VERSION": "2660ac2 / v2.5.2-asof-AUDIT_FIX_ASOF_001",
+  "BASELINE_VERSION": "NONE (establishing first baseline)",
+  "DATA_AUDIT": "PASS (AUDIT_FIX_ASOF_001 @ 2660ac2)",
+  "DATA_RANGE": {
+    "start_ms": 1787406328756,
+    "end_ms": 1789220728756,
+    "start_iso": "2026-08-22T13:45:28.756000+00:00",
+    "end_iso": "2026-09-12T13:45:28.756000+00:00",
+    "notes": [
+      "Binance Futures public hist (klines + OI/LS/taker)",
+      "Liquidation map DISABLED (no PIT snapshots)",
+      "Macro DISABLED for historical as_of",
+      "FLAT threshold = min_directional_space (5m:8 / 1h:30 / 1d:60 USDT)",
+      "NEUTRAL predictions mapped to FLAT for metrics",
+      "ALIGNED: btc_lead_lag uses spillover_score/lead_signal/divergence_pct (online parity)",
+      "ALIGNED: vol_ratio from last closed 5m / MA20 closed vols",
+      "ALIGNED: funding_rate from fundingRate hist as-of T",
+      "ALIGNED: topLongShortPositionRatio (not AccountRatio)",
+      "ALIGNED: Walk-Forward IS per-window expanding; OOS folds non-overlapping; global gap uses 60/40 disjoint cut"
+    ]
+  },
+  "WALK_FORWARD_WINDOWS": {
+    "5m": {
+      "windows": [
+        {
+          "id": "W1",
+          "oos": [
+            1787406599999,
+            1787860049999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        },
+        {
+          "id": "W2",
+          "oos": [
+            1787860049999,
+            1788313499999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        },
+        {
+          "id": "W3",
+          "oos": [
+            1788313499999,
+            1788766949999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        },
+        {
+          "id": "W4",
+          "oos": [
+            1788766949999,
+            1789220399999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        }
+      ],
+      "note": "OOS folds are contiguous non-overlapping. IS is evaluated per window independently so W2+ IS is not consumed by earlier OOS labels."
+    },
+    "1h": {
+      "windows": [
+        {
+          "id": "W1",
+          "oos": [
+            1787407199999,
+            1787858999999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        },
+        {
+          "id": "W2",
+          "oos": [
+            1787858999999,
+            1788310799999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        },
+        {
+          "id": "W3",
+          "oos": [
+            1788310799999,
+            1788762599999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        },
+        {
+          "id": "W4",
+          "oos": [
+            1788762599999,
+            1789214399999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        }
+      ],
+      "note": "OOS folds are contiguous non-overlapping. IS is evaluated per window independently so W2+ IS is not consumed by earlier OOS labels."
+    },
+    "1d": {
+      "windows": [
+        {
+          "id": "W1",
+          "oos": [
+            1787443199999,
+            1788263999999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        },
+        {
+          "id": "W2",
+          "oos": [
+            1788263999999,
+            1789084799999
+          ],
+          "is_rule": "expanding: all samples with as_of_ms < oos_start (per-window, independent)"
+        }
+      ],
+      "note": "OOS folds are contiguous non-overlapping. IS is evaluated per window independently so W2+ IS is not consumed by earlier OOS labels."
+    }
+  },
+  "RESULTS": {
+    "5m": {
+      "IS": {
+        "n": 3628,
+        "direction_accuracy": 0.7491730981256891,
+        "up_acc": 0.11363636363636363,
+        "down_acc": 0.06666666666666667,
+        "flat_acc": 0.78008658008658,
+        "target_price_mean_err_pct": 0.4731503772597148,
+        "target_price_median_err_pct": 0.38970899770537176,
+        "pred_dist": {
+          "UP": 350,
+          "DOWN": 448,
+          "FLAT": 2830
+        },
+        "actual_dist": {
+          "UP": 88,
+          "DOWN": 75,
+          "FLAT": 3465
+        }
+      },
+      "OOS": {
+        "n": 2419,
+        "direction_accuracy": 0.7523770152955767,
+        "up_acc": 0.16666666666666666,
+        "down_acc": 0.18421052631578946,
+        "flat_acc": 0.7690344534240748,
+        "target_price_mean_err_pct": 0.4395974219983992,
+        "target_price_median_err_pct": 0.3129544669328841,
+        "pred_dist": {
+          "UP": 227,
+          "DOWN": 338,
+          "FLAT": 1854
+        },
+        "actual_dist": {
+          "UP": 30,
+          "DOWN": 38,
+          "FLAT": 2351
+        }
+      },
+      "IS_OOS_split": "chronological 60/40 cut (disjoint) for gap only",
+      "per_window": {
+        "W1": {
+          "IS": {
+            "n": 0,
+            "direction_accuracy": null,
+            "up_acc": null,
+            "down_acc": null,
+            "flat_acc": null,
+            "target_price_mean_err_pct": null,
+            "target_price_median_err_pct": null
+          },
+          "OOS": {
+            "n": 1512,
+            "direction_accuracy": 0.7129629629629629,
+            "up_acc": 0.1320754716981132,
+            "down_acc": 0.07142857142857142,
+            "flat_acc": 0.7537050105857446,
+            "target_price_mean_err_pct": 0.5389044992401412,
+            "target_price_median_err_pct": 0.47776626265938943,
+            "pred_dist": {
+              "UP": 147,
+              "DOWN": 224,
+              "FLAT": 1141
+            },
+            "actual_dist": {
+              "UP": 53,
+              "DOWN": 42,
+              "FLAT": 1417
+            }
+          },
+          "oos_range": [
+            1787406599999,
+            1787860049999
+          ],
+          "n_is": 0,
+          "n_oos": 1512
+        },
+        "W2": {
+          "IS": {
+            "n": 1512,
+            "direction_accuracy": 0.7129629629629629,
+            "up_acc": 0.1320754716981132,
+            "down_acc": 0.07142857142857142,
+            "flat_acc": 0.7537050105857446,
+            "target_price_mean_err_pct": 0.5389044992401412,
+            "target_price_median_err_pct": 0.47776626265938943,
+            "pred_dist": {
+              "UP": 147,
+              "DOWN": 224,
+              "FLAT": 1141
+            },
+            "actual_dist": {
+              "UP": 53,
+              "DOWN": 42,
+              "FLAT": 1417
+            }
+          },
+          "OOS": {
+            "n": 1512,
+            "direction_accuracy": 0.794973544973545,
+            "up_acc": 0.08333333333333333,
+            "down_acc": 0.0,
+            "flat_acc": 0.819672131147541,
+            "target_price_mean_err_pct": 0.4354497131965674,
+            "target_price_median_err_pct": 0.3314674130347846,
+            "pred_dist": {
+              "UP": 145,
+              "DOWN": 126,
+              "FLAT": 1241
+            },
+            "actual_dist": {
+              "UP": 24,
+              "DOWN": 24,
+              "FLAT": 1464
+            }
+          },
+          "oos_range": [
+            1787860049999,
+            1788313499999
+          ],
+          "n_is": 1512,
+          "n_oos": 1512
+        },
+        "W3": {
+          "IS": {
+            "n": 3023,
+            "direction_accuracy": 0.7538868673503143,
+            "up_acc": 0.11688311688311688,
+            "down_acc": 0.045454545454545456,
+            "flat_acc": 0.7871527777777778,
+            "target_price_mean_err_pct": 0.4952343325457354,
+            "target_price_median_err_pct": 0.40596241734429783,
+            "pred_dist": {
+              "UP": 292,
+              "DOWN": 350,
+              "FLAT": 2381
+            },
+            "actual_dist": {
+              "UP": 77,
+              "DOWN": 66,
+              "FLAT": 2880
+            }
+          },
+          "OOS": {
+            "n": 1512,
+            "direction_accuracy": 0.751984126984127,
+            "up_acc": 0.11764705882352941,
+            "down_acc": 0.16666666666666666,
+            "flat_acc": 0.7664184157075152,
+            "target_price_mean_err_pct": 0.3680249908659699,
+            "target_price_median_err_pct": 0.27767923766653213,
+            "pred_dist": {
+              "UP": 122,
+              "DOWN": 234,
+              "FLAT": 1156
+            },
+            "actual_dist": {
+              "UP": 17,
+              "DOWN": 18,
+              "FLAT": 1477
+            }
+          },
+          "oos_range": [
+            1788313499999,
+            1788766949999
+          ],
+          "n_is": 3023,
+          "n_oos": 1512
+        },
+        "W4": {
+          "IS": {
+            "n": 4535,
+            "direction_accuracy": 0.7532524807056229,
+            "up_acc": 0.11702127659574468,
+            "down_acc": 0.07142857142857142,
+            "flat_acc": 0.7801239384897866,
+            "target_price_mean_err_pct": 0.44985705234734213,
+            "target_price_median_err_pct": 0.3549318350957186,
+            "pred_dist": {
+              "UP": 414,
+              "DOWN": 584,
+              "FLAT": 3537
+            },
+            "actual_dist": {
+              "UP": 94,
+              "DOWN": 84,
+              "FLAT": 4357
+            }
+          },
+          "OOS": {
+            "n": 1512,
+            "direction_accuracy": 0.7420634920634921,
+            "up_acc": 0.16666666666666666,
+            "down_acc": 0.20689655172413793,
+            "flat_acc": 0.7621658670322139,
+            "target_price_mean_err_pct": 0.4849019349032891,
+            "target_price_median_err_pct": 0.363171293782642,
+            "pred_dist": {
+              "UP": 163,
+              "DOWN": 202,
+              "FLAT": 1147
+            },
+            "actual_dist": {
+              "UP": 24,
+              "DOWN": 29,
+              "FLAT": 1459
+            }
+          },
+          "oos_range": [
+            1788766949999,
+            1789220399999
+          ],
+          "n_is": 4535,
+          "n_oos": 1512
+        }
+      },
+      "per_window_OOS": {
+        "W1": {
+          "n": 1512,
+          "direction_accuracy": 0.7129629629629629,
+          "up_acc": 0.1320754716981132,
+          "down_acc": 0.07142857142857142,
+          "flat_acc": 0.7537050105857446,
+          "target_price_mean_err_pct": 0.5389044992401412,
+          "target_price_median_err_pct": 0.47776626265938943,
+          "pred_dist": {
+            "UP": 147,
+            "DOWN": 224,
+            "FLAT": 1141
+          },
+          "actual_dist": {
+            "UP": 53,
+            "DOWN": 42,
+            "FLAT": 1417
+          }
+        },
+        "W2": {
+          "n": 1512,
+          "direction_accuracy": 0.794973544973545,
+          "up_acc": 0.08333333333333333,
+          "down_acc": 0.0,
+          "flat_acc": 0.819672131147541,
+          "target_price_mean_err_pct": 0.4354497131965674,
+          "target_price_median_err_pct": 0.3314674130347846,
+          "pred_dist": {
+            "UP": 145,
+            "DOWN": 126,
+            "FLAT": 1241
+          },
+          "actual_dist": {
+            "UP": 24,
+            "DOWN": 24,
+            "FLAT": 1464
+          }
+        },
+        "W3": {
+          "n": 1512,
+          "direction_accuracy": 0.751984126984127,
+          "up_acc": 0.11764705882352941,
+          "down_acc": 0.16666666666666666,
+          "flat_acc": 0.7664184157075152,
+          "target_price_mean_err_pct": 0.3680249908659699,
+          "target_price_median_err_pct": 0.27767923766653213,
+          "pred_dist": {
+            "UP": 122,
+            "DOWN": 234,
+            "FLAT": 1156
+          },
+          "actual_dist": {
+            "UP": 17,
+            "DOWN": 18,
+            "FLAT": 1477
+          }
+        },
+        "W4": {
+          "n": 1512,
+          "direction_accuracy": 0.7420634920634921,
+          "up_acc": 0.16666666666666666,
+          "down_acc": 0.20689655172413793,
+          "flat_acc": 0.7621658670322139,
+          "target_price_mean_err_pct": 0.4849019349032891,
+          "target_price_median_err_pct": 0.363171293782642,
+          "pred_dist": {
+            "UP": 163,
+            "DOWN": 202,
+            "FLAT": 1147
+          },
+          "actual_dist": {
+            "UP": 24,
+            "DOWN": 29,
+            "FLAT": 1459
+          }
+        }
+      },
+      "generalization_gap_dir_acc": -0.003203917169887549
+    },
+    "1h": {
+      "IS": {
+        "n": 301,
+        "direction_accuracy": 0.46179401993355484,
+        "up_acc": 0.0,
+        "down_acc": 0.6,
+        "flat_acc": 0.4657534246575342,
+        "target_price_mean_err_pct": 1.6979104310743944,
+        "target_price_median_err_pct": 1.4028138120687903,
+        "pred_dist": {
+          "UP": 80,
+          "DOWN": 82,
+          "FLAT": 139
+        },
+        "actual_dist": {
+          "UP": 4,
+          "DOWN": 5,
+          "FLAT": 292
+        }
+      },
+      "OOS": {
+        "n": 202,
+        "direction_accuracy": 0.5396039603960396,
+        "up_acc": 0.0,
+        "down_acc": 0.3333333333333333,
+        "flat_acc": 0.5482233502538071,
+        "target_price_mean_err_pct": 1.6728082651416316,
+        "target_price_median_err_pct": 1.4273461395303757,
+        "pred_dist": {
+          "UP": 39,
+          "DOWN": 53,
+          "FLAT": 110
+        },
+        "actual_dist": {
+          "UP": 2,
+          "DOWN": 3,
+          "FLAT": 197
+        }
+      },
+      "IS_OOS_split": "chronological 60/40 cut (disjoint) for gap only",
+      "per_window": {
+        "W1": {
+          "IS": {
+            "n": 0,
+            "direction_accuracy": null,
+            "up_acc": null,
+            "down_acc": null,
+            "flat_acc": null,
+            "target_price_mean_err_pct": null,
+            "target_price_median_err_pct": null
+          },
+          "OOS": {
+            "n": 126,
+            "direction_accuracy": 0.5555555555555556,
+            "up_acc": 0.0,
+            "down_acc": 0.6666666666666666,
+            "flat_acc": 0.5619834710743802,
+            "target_price_mean_err_pct": 1.3922869092279186,
+            "target_price_median_err_pct": 1.338234099585729,
+            "pred_dist": {
+              "UP": 19,
+              "DOWN": 37,
+              "FLAT": 70
+            },
+            "actual_dist": {
+              "UP": 2,
+              "DOWN": 3,
+              "FLAT": 121
+            }
+          },
+          "oos_range": [
+            1787407199999,
+            1787858999999
+          ],
+          "n_is": 0,
+          "n_oos": 126
+        },
+        "W2": {
+          "IS": {
+            "n": 126,
+            "direction_accuracy": 0.5555555555555556,
+            "up_acc": 0.0,
+            "down_acc": 0.6666666666666666,
+            "flat_acc": 0.5619834710743802,
+            "target_price_mean_err_pct": 1.3922869092279186,
+            "target_price_median_err_pct": 1.338234099585729,
+            "pred_dist": {
+              "UP": 19,
+              "DOWN": 37,
+              "FLAT": 70
+            },
+            "actual_dist": {
+              "UP": 2,
+              "DOWN": 3,
+              "FLAT": 121
+            }
+          },
+          "OOS": {
+            "n": 126,
+            "direction_accuracy": 0.3968253968253968,
+            "up_acc": 0.0,
+            "down_acc": 0.5,
+            "flat_acc": 0.3983739837398374,
+            "target_price_mean_err_pct": 1.5703212207376316,
+            "target_price_median_err_pct": 1.4655819974747992,
+            "pred_dist": {
+              "UP": 50,
+              "DOWN": 26,
+              "FLAT": 50
+            },
+            "actual_dist": {
+              "UP": 1,
+              "DOWN": 2,
+              "FLAT": 123
+            }
+          },
+          "oos_range": [
+            1787858999999,
+            1788310799999
+          ],
+          "n_is": 126,
+          "n_oos": 126
+        },
+        "W3": {
+          "IS": {
+            "n": 251,
+            "direction_accuracy": 0.47808764940239046,
+            "up_acc": 0.0,
+            "down_acc": 0.6,
+            "flat_acc": 0.48148148148148145,
+            "target_price_mean_err_pct": 1.4913007102044993,
+            "target_price_median_err_pct": 1.3424762211184664,
+            "pred_dist": {
+              "UP": 68,
+              "DOWN": 63,
+              "FLAT": 120
+            },
+            "actual_dist": {
+              "UP": 3,
+              "DOWN": 5,
+              "FLAT": 243
+            }
+          },
+          "OOS": {
+            "n": 126,
+            "direction_accuracy": 0.3968253968253968,
+            "up_acc": 0.0,
+            "down_acc": 1.0,
+            "flat_acc": 0.3951612903225806,
+            "target_price_mean_err_pct": 2.3307294146481854,
+            "target_price_median_err_pct": 2.0004488055651786,
+            "pred_dist": {
+              "UP": 24,
+              "DOWN": 53,
+              "FLAT": 49
+            },
+            "actual_dist": {
+              "UP": 1,
+              "DOWN": 1,
+              "FLAT": 124
+            }
+          },
+          "oos_range": [
+            1788310799999,
+            1788762599999
+          ],
+          "n_is": 251,
+          "n_oos": 126
+        },
+        "W4": {
+          "IS": {
+            "n": 377,
+            "direction_accuracy": 0.4509283819628647,
+            "up_acc": 0.0,
+            "down_acc": 0.6666666666666666,
+            "flat_acc": 0.45231607629427795,
+            "target_price_mean_err_pct": 1.8020507594456716,
+            "target_price_median_err_pct": 1.5069528597310158,
+            "pred_dist": {
+              "UP": 92,
+              "DOWN": 116,
+              "FLAT": 169
+            },
+            "actual_dist": {
+              "UP": 4,
+              "DOWN": 6,
+              "FLAT": 367
+            }
+          },
+          "OOS": {
+            "n": 126,
+            "direction_accuracy": 0.6190476190476191,
+            "up_acc": 0.0,
+            "down_acc": 0.0,
+            "flat_acc": 0.639344262295082,
+            "target_price_mean_err_pct": 1.1768107013561377,
+            "target_price_median_err_pct": 0.8866517071987503,
+            "pred_dist": {
+              "UP": 27,
+              "DOWN": 19,
+              "FLAT": 80
+            },
+            "actual_dist": {
+              "UP": 2,
+              "DOWN": 2,
+              "FLAT": 122
+            }
+          },
+          "oos_range": [
+            1788762599999,
+            1789214399999
+          ],
+          "n_is": 377,
+          "n_oos": 126
+        }
+      },
+      "per_window_OOS": {
+        "W1": {
+          "n": 126,
+          "direction_accuracy": 0.5555555555555556,
+          "up_acc": 0.0,
+          "down_acc": 0.6666666666666666,
+          "flat_acc": 0.5619834710743802,
+          "target_price_mean_err_pct": 1.3922869092279186,
+          "target_price_median_err_pct": 1.338234099585729,
+          "pred_dist": {
+            "UP": 19,
+            "DOWN": 37,
+            "FLAT": 70
+          },
+          "actual_dist": {
+            "UP": 2,
+            "DOWN": 3,
+            "FLAT": 121
+          }
+        },
+        "W2": {
+          "n": 126,
+          "direction_accuracy": 0.3968253968253968,
+          "up_acc": 0.0,
+          "down_acc": 0.5,
+          "flat_acc": 0.3983739837398374,
+          "target_price_mean_err_pct": 1.5703212207376316,
+          "target_price_median_err_pct": 1.4655819974747992,
+          "pred_dist": {
+            "UP": 50,
+            "DOWN": 26,
+            "FLAT": 50
+          },
+          "actual_dist": {
+            "UP": 1,
+            "DOWN": 2,
+            "FLAT": 123
+          }
+        },
+        "W3": {
+          "n": 126,
+          "direction_accuracy": 0.3968253968253968,
+          "up_acc": 0.0,
+          "down_acc": 1.0,
+          "flat_acc": 0.3951612903225806,
+          "target_price_mean_err_pct": 2.3307294146481854,
+          "target_price_median_err_pct": 2.0004488055651786,
+          "pred_dist": {
+            "UP": 24,
+            "DOWN": 53,
+            "FLAT": 49
+          },
+          "actual_dist": {
+            "UP": 1,
+            "DOWN": 1,
+            "FLAT": 124
+          }
+        },
+        "W4": {
+          "n": 126,
+          "direction_accuracy": 0.6190476190476191,
+          "up_acc": 0.0,
+          "down_acc": 0.0,
+          "flat_acc": 0.639344262295082,
+          "target_price_mean_err_pct": 1.1768107013561377,
+          "target_price_median_err_pct": 0.8866517071987503,
+          "pred_dist": {
+            "UP": 27,
+            "DOWN": 19,
+            "FLAT": 80
+          },
+          "actual_dist": {
+            "UP": 2,
+            "DOWN": 2,
+            "FLAT": 122
+          }
+        }
+      },
+      "generalization_gap_dir_acc": -0.0778099404624848
+    },
+    "1d": {
+      "IS": {
+        "n": 12,
+        "direction_accuracy": 0.3333333333333333,
+        "up_acc": 0.5,
+        "down_acc": 0.0,
+        "flat_acc": 0.3333333333333333,
+        "target_price_mean_err_pct": 3.130246326767236,
+        "target_price_median_err_pct": 2.7765264752856456,
+        "pred_dist": {
+          "UP": 4,
+          "DOWN": 3,
+          "FLAT": 5
+        },
+        "actual_dist": {
+          "UP": 2,
+          "DOWN": 1,
+          "FLAT": 9
+        }
+      },
+      "OOS": {
+        "n": 8,
+        "direction_accuracy": 0.5,
+        "up_acc": 0.0,
+        "down_acc": null,
+        "flat_acc": 0.5714285714285714,
+        "target_price_mean_err_pct": 3.2884449926077566,
+        "target_price_median_err_pct": 3.5752360182734213,
+        "pred_dist": {
+          "UP": 1,
+          "DOWN": 3,
+          "FLAT": 4
+        },
+        "actual_dist": {
+          "UP": 1,
+          "DOWN": 0,
+          "FLAT": 7
+        }
+      },
+      "IS_OOS_split": "chronological 60/40 cut (disjoint) for gap only",
+      "per_window": {
+        "W1": {
+          "IS": {
+            "n": 0,
+            "direction_accuracy": null,
+            "up_acc": null,
+            "down_acc": null,
+            "flat_acc": null,
+            "target_price_mean_err_pct": null,
+            "target_price_median_err_pct": null
+          },
+          "OOS": {
+            "n": 10,
+            "direction_accuracy": 0.4,
+            "up_acc": 1.0,
+            "down_acc": 0.0,
+            "flat_acc": 0.375,
+            "target_price_mean_err_pct": 2.953700509056823,
+            "target_price_median_err_pct": 2.7765264752856456,
+            "pred_dist": {
+              "UP": 3,
+              "DOWN": 3,
+              "FLAT": 4
+            },
+            "actual_dist": {
+              "UP": 1,
+              "DOWN": 1,
+              "FLAT": 8
+            }
+          },
+          "oos_range": [
+            1787443199999,
+            1788263999999
+          ],
+          "n_is": 0,
+          "n_oos": 10
+        },
+        "W2": {
+          "IS": {
+            "n": 10,
+            "direction_accuracy": 0.4,
+            "up_acc": 1.0,
+            "down_acc": 0.0,
+            "flat_acc": 0.375,
+            "target_price_mean_err_pct": 2.953700509056823,
+            "target_price_median_err_pct": 2.7765264752856456,
+            "pred_dist": {
+              "UP": 3,
+              "DOWN": 3,
+              "FLAT": 4
+            },
+            "actual_dist": {
+              "UP": 1,
+              "DOWN": 1,
+              "FLAT": 8
+            }
+          },
+          "OOS": {
+            "n": 10,
+            "direction_accuracy": 0.4,
+            "up_acc": 0.0,
+            "down_acc": null,
+            "flat_acc": 0.5,
+            "target_price_mean_err_pct": 3.4686602406921487,
+            "target_price_median_err_pct": 3.5752360182734213,
+            "pred_dist": {
+              "UP": 2,
+              "DOWN": 3,
+              "FLAT": 5
+            },
+            "actual_dist": {
+              "UP": 2,
+              "DOWN": 0,
+              "FLAT": 8
+            }
+          },
+          "oos_range": [
+            1788263999999,
+            1789084799999
+          ],
+          "n_is": 10,
+          "n_oos": 10
+        }
+      },
+      "per_window_OOS": {
+        "W1": {
+          "n": 10,
+          "direction_accuracy": 0.4,
+          "up_acc": 1.0,
+          "down_acc": 0.0,
+          "flat_acc": 0.375,
+          "target_price_mean_err_pct": 2.953700509056823,
+          "target_price_median_err_pct": 2.7765264752856456,
+          "pred_dist": {
+            "UP": 3,
+            "DOWN": 3,
+            "FLAT": 4
+          },
+          "actual_dist": {
+            "UP": 1,
+            "DOWN": 1,
+            "FLAT": 8
+          }
+        },
+        "W2": {
+          "n": 10,
+          "direction_accuracy": 0.4,
+          "up_acc": 0.0,
+          "down_acc": null,
+          "flat_acc": 0.5,
+          "target_price_mean_err_pct": 3.4686602406921487,
+          "target_price_median_err_pct": 3.5752360182734213,
+          "pred_dist": {
+            "UP": 2,
+            "DOWN": 3,
+            "FLAT": 5
+          },
+          "actual_dist": {
+            "UP": 2,
+            "DOWN": 0,
+            "FLAT": 8
+          }
+        }
+      },
+      "generalization_gap_dir_acc": -0.16666666666666669
+    }
+  },
+  "IS_vs_OOS": {
+    "5m": {
+      "IS_direction_accuracy_pct": 74.92,
+      "OOS_direction_accuracy_pct": 75.24,
+      "gap_pp": -0.32,
+      "IS_target_mean_err_pct": 0.4731503772597148,
+      "OOS_target_mean_err_pct": 0.4395974219983992
+    },
+    "1h": {
+      "IS_direction_accuracy_pct": 46.18,
+      "OOS_direction_accuracy_pct": 53.96,
+      "gap_pp": -7.78,
+      "IS_target_mean_err_pct": 1.6979104310743944,
+      "OOS_target_mean_err_pct": 1.6728082651416316
+    },
+    "1d": {
+      "IS_direction_accuracy_pct": 33.33,
+      "OOS_direction_accuracy_pct": 50.0,
+      "gap_pp": -16.67,
+      "IS_target_mean_err_pct": 3.130246326767236,
+      "OOS_target_mean_err_pct": 3.2884449926077566
+    }
+  },
+  "OVERFITTING_ASSESSMENT": "LOW"
+}

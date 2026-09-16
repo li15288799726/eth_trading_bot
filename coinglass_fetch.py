@@ -63,15 +63,30 @@ def find_latest_agg(max_age_sec=600):
 
 def fetch_liq(timeout=420):
     """子进程运行爬虫, 成功后把最新聚合数据固化到 liq_latest.json"""
-    log("启动清算地图爬虫 (ETH 聚合图)...")
+    cookies_candidates = [
+        BASE / "coinglass_manual.json",
+        Path.home() / "coinglass_manual.json",
+        BASE / "coinglass_auth.json",
+    ]
+    cookies_file = next((c for c in cookies_candidates if c.exists()), None)
+
+    cmd = [sys.executable, str(SCRAPER), "--symbol", "ETH",
+           "--out", str(DATA_DIR), "--wait", "10"]
+    if cookies_file:
+        cmd.extend(["--cookies", str(cookies_file)])
+
     try:
         r = subprocess.run(
-            [sys.executable, str(SCRAPER), "--symbol", "ETH",
-             "--out", str(DATA_DIR), "--wait", "20"],
+            cmd,
             cwd=str(BASE), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "爬虫超时(%ds)" % timeout
+
+    out_str = (r.stdout or "") + " " + (r.stderr or "")
+    if "code 40000" in out_str or "code=40000" in out_str:
+        return False, "CoinGlass ETH 数据需登录 (code 40000)，当前 cookies 已失效，请更新 coinglass_manual.json"
+
     if r.returncode != 0:
         tail = (r.stdout or "").strip().splitlines()[-3:]
         return False, "爬虫退出码 %d: %s" % (r.returncode, " / ".join(tail))
@@ -162,10 +177,24 @@ async def fetch_vwap():
             page = await ctx.new_page()
             try:
                 await page.goto(LEGEND_URL, wait_until="domcontentloaded",
-                                timeout=90000)
+                                timeout=60000)
             except Exception:
                 log("goto 超时, 继续尝试解析")
-            await page.wait_for_timeout(15000)
+
+            # 移除页面遮罩
+            try:
+                await page.evaluate("""() => {
+                    document.querySelectorAll('#termly-code-snippet-support, [data-termly-part], .fc-consent-root, .fc-dialog-overlay, .MuiModal-root, .MuiModal-backdrop, .MuiBackdrop-root').forEach(e => e.remove());
+                    document.body.style.overflow = 'auto';
+                }""")
+            except Exception:
+                pass
+            await page.wait_for_timeout(3000)
+
+            if "login" in page.url:
+                log("VWAP legend 页面已重定向到登录页: %s" % page.url)
+                return False, "VWAP 图表需要登录访问"
+
             # 悬停到最新K线再读图例(图例跟随鼠标所在K线)
             hovered = await _hover_latest_candle(page)
             if hovered:
